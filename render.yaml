@@ -47,8 +47,9 @@ services:
   - type: web
     name: jk-maini-frontend
     runtime: static
-    buildCommand: cd frontend && npm install && npm run build
-    staticPublishPath: frontend/dist
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
     envVars:
       - key: VITE_API_URL
         sync: false  # Set manually: paste your backend URL (e.g. https://jk-maini-backend.onrender.com)
