@@ -1,0 +1,61 @@
+# Render Blueprint — deploys Backend + Frontend + PostgreSQL
+# https://render.com/docs/blueprint-spec
+
+databases:
+  - name: jk-maini-db
+    plan: free
+    databaseName: jk_maini_db
+    user: jk_maini_user
+
+services:
+  # ── Backend (FastAPI) ──────────────────────────
+  - type: web
+    name: jk-maini-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: jk-maini-db
+          property: connectionString
+        # Render gives postgresql:// — we need postgresql+asyncpg://
+        # We'll handle this with a start script
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 60
+      - key: ANTHROPIC_API_KEY
+        sync: false  # Set manually in Render dashboard
+      - key: TESSERACT_CMD
+        value: tesseract
+      - key: APP_NAME
+        value: JK Maini - AI Email to ZSO Automation
+      - key: DEBUG
+        value: false
+      - key: LOG_LEVEL
+        value: INFO
+      - key: UPLOAD_DIR
+        value: ./uploads
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+  # ── Frontend (React/Vite Static Site) ──────────
+  - type: web
+    name: jk-maini-frontend
+    runtime: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          name: jk-maini-backend
+          type: web
+          property: url
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
