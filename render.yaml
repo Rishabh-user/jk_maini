@@ -51,10 +51,7 @@ services:
     staticPublishPath: frontend/dist
     envVars:
       - key: VITE_API_URL
-        fromService:
-          name: jk-maini-backend
-          type: web
-          property: url
+        sync: false  # Set manually: paste your backend URL (e.g. https://jk-maini-backend.onrender.com)
     routes:
       - type: rewrite
         source: /*
