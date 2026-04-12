@@ -29,14 +29,23 @@ class GmailService:
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
+                logger.info("Gmail token expired, refreshing...")
                 creds.refresh(Request())
+                # Save refreshed token back to file
+                try:
+                    with open(settings.GMAIL_TOKEN_FILE, "w") as token:
+                        token.write(creds.to_json())
+                    logger.info("Refreshed Gmail token saved to file")
+                except Exception as e:
+                    logger.warning(f"Could not save refreshed token to file: {e}")
             else:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    settings.GMAIL_CREDENTIALS_FILE, self.scopes
+                # On production (headless server), we cannot open a browser.
+                # The token.json must be provided via GMAIL_TOKEN_B64 env var.
+                raise RuntimeError(
+                    "Gmail token is missing or invalid and cannot be refreshed. "
+                    "Please re-authenticate locally and update the GMAIL_TOKEN_B64 "
+                    "environment variable on Render with a fresh token."
                 )
-                creds = flow.run_local_server(port=0)
-            with open(settings.GMAIL_TOKEN_FILE, "w") as token:
-                token.write(creds.to_json())
 
         self.service = build("gmail", "v1", credentials=creds)
         logger.info("Gmail API authenticated successfully")
