@@ -13,6 +13,17 @@ fi
 # Create uploads dir
 mkdir -p ./uploads
 
+# Write Gmail credential files from base64 env vars
+if [ -n "$GMAIL_CREDENTIALS_B64" ]; then
+  echo "$GMAIL_CREDENTIALS_B64" | base64 -d > credentials.json
+  echo "Wrote credentials.json from GMAIL_CREDENTIALS_B64"
+fi
+
+if [ -n "$GMAIL_TOKEN_B64" ]; then
+  echo "$GMAIL_TOKEN_B64" | base64 -d > token.json
+  echo "Wrote token.json from GMAIL_TOKEN_B64"
+fi
+
 echo "Starting JK Maini Backend..."
 echo "DATABASE_URL: ${DATABASE_URL:0:40}..."
 exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"
