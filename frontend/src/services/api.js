@@ -157,4 +157,19 @@ export const fetchBudgetVsActual = (fiscalYear) =>
 export const fetchPerformanceKPIs = (fiscalYear) =>
   api.get(`/performance/kpis?fiscal_year=${fiscalYear}`)
 
+// ─── Document Upload ───────────────────────
+export const uploadDocument = (file, autoProcess = true) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return api.post(`/uploads/document?process=${autoProcess}`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+export const processUpload = (uploadId) =>
+  api.post(`/uploads/document/${uploadId}/process`)
+export const fetchUploads = (skip = 0, limit = 50) =>
+  api.get(`/uploads/documents?skip=${skip}&limit=${limit}`)
+export const deleteUpload = (uploadId) =>
+  api.delete(`/uploads/document/${uploadId}`)
+
 export default api

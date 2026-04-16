@@ -10,12 +10,14 @@ import {
   Package,
   Shield,
   BarChart3,
+  Upload,
 } from 'lucide-react'
 
 const mainLinks = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/inbox', label: 'Email Inbox', icon: Mail },
   { to: '/raw-data', label: 'Raw Data Viewer', icon: Table2 },
+  { to: '/upload-document', label: 'Upload Document', icon: Upload },
 ]
 
 const dataLinks = [

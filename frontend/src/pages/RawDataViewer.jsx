@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Search, Sparkles, ChevronLeft, ChevronRight, FileSpreadsheet } from 'lucide-react'
-import StatusBadge from '../components/StatusBadge'
+import { Search, Sparkles, ChevronLeft, ChevronRight, FileSpreadsheet, Upload, Mail } from 'lucide-react'
 import { fetchEmails, fetchAttachmentRawData } from '../services/api'
 
 const PAGE_SIZE = 15
@@ -14,25 +13,27 @@ export default function RawDataViewer() {
   const [loading, setLoading] = useState(true)
   const [loadingData, setLoadingData] = useState(false)
 
-  // Step 1: Load all emails and collect attachments
+  // Load all emails (including manual uploads) and collect attachments
   useEffect(() => {
     async function load() {
       try {
-        const emailsRes = await fetchEmails(0, 100)
+        const emailsRes = await fetchEmails(0, 200)
         const emails = emailsRes.data.emails || []
         const atts = []
         for (const email of emails) {
+          if (email.status !== 'PROCESSED') continue
+          const isManual = email.gmail_message_id?.startsWith('manual-upload-')
           for (const att of email.attachments || []) {
             atts.push({
               id: att.id,
               filename: att.filename,
               emailSubject: email.subject || '(No subject)',
               emailStatus: email.status,
+              isManual,
             })
           }
         }
         setAttachments(atts)
-        // Auto-select first attachment
         if (atts.length > 0) {
           setSelectedAtt(atts[0])
         }
@@ -45,7 +46,7 @@ export default function RawDataViewer() {
     load()
   }, [])
 
-  // Step 2: When attachment is selected, fetch its raw data
+  // When attachment is selected, fetch its raw data
   useEffect(() => {
     if (!selectedAtt) return
     setLoadingData(true)
@@ -53,7 +54,6 @@ export default function RawDataViewer() {
     fetchAttachmentRawData(selectedAtt.id)
       .then((res) => {
         const entries = res.data || []
-        // Use extracted_data.rows (all original columns) instead of mapped_data
         const allRows = []
         for (const entry of entries) {
           const rows = entry.extracted_data?.rows || []
@@ -70,7 +70,7 @@ export default function RawDataViewer() {
       .finally(() => setLoadingData(false))
   }, [selectedAtt])
 
-  // Get dynamic columns from the data
+  // Dynamic columns
   const columns = rawEntries.length > 0
     ? Object.keys(rawEntries[0]).filter((k) => k !== '_source')
     : []
@@ -98,26 +98,32 @@ export default function RawDataViewer() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Raw Data Viewer</h1>
         <p className="text-sm text-gray-500 mt-1">
-          AI-extracted data from email attachments ({attachments.length} attachments, {rawEntries.length} rows)
+          AI-extracted data from email attachments & manual uploads ({attachments.length} files, {rawEntries.length} rows)
         </p>
       </div>
 
       {/* Attachment selector */}
-      <div className="flex items-center gap-3 mb-4 flex-wrap">
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
         {attachments.map((att) => (
           <button
             key={att.id}
             onClick={() => setSelectedAtt(att)}
-            className={`flex items-center gap-2 px-3 py-2 text-sm rounded-lg border transition-colors ${
+            className={`flex items-center gap-2 px-3 py-2 text-xs rounded-lg border transition-colors ${
               selectedAtt?.id === att.id
                 ? 'bg-blue-600 text-white border-blue-600'
                 : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
             }`}
           >
-            <FileSpreadsheet size={14} />
-            {att.filename}
+            {att.isManual ? <Upload size={12} /> : <Mail size={12} />}
+            <FileSpreadsheet size={12} />
+            <span className="max-w-[140px] truncate">{att.filename}</span>
           </button>
         ))}
+        {attachments.length === 0 && (
+          <p className="text-sm text-gray-500">
+            No processed data yet. Process emails or upload documents first.
+          </p>
+        )}
       </div>
 
       {/* Search */}
@@ -133,9 +139,14 @@ export default function RawDataViewer() {
           />
         </div>
         {selectedAtt && (
-          <div className="text-sm text-gray-500">
-            <Sparkles size={14} className="inline text-blue-500 mr-1" />
-            Source: <span className="font-medium text-gray-700">{selectedAtt.emailSubject}</span>
+          <div className="flex items-center gap-2 text-sm text-gray-500">
+            <Sparkles size={14} className="text-blue-500" />
+            <span>
+              Source: <span className="font-medium text-gray-700">{selectedAtt.emailSubject}</span>
+            </span>
+            {selectedAtt.isManual && (
+              <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">Manual Upload</span>
+            )}
           </div>
         )}
       </div>
@@ -152,7 +163,7 @@ export default function RawDataViewer() {
               <tr className="border-b border-gray-100">
                 {columns.map((col) => (
                   <th key={col} className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 whitespace-nowrap">
-                    {col} <span className="text-gray-400">&#8597;</span>
+                    {col}
                   </th>
                 ))}
               </tr>
@@ -162,8 +173,8 @@ export default function RawDataViewer() {
                 <tr>
                   <td colSpan={columns.length || 1} className="px-6 py-8 text-center text-sm text-gray-500">
                     {attachments.length === 0
-                      ? 'No attachments found. Process emails first to extract data.'
-                      : 'No data for this attachment. Click "Process" on the email first.'}
+                      ? 'No data found. Process emails or upload documents first.'
+                      : 'No data for this file. It may not have been processed yet.'}
                   </td>
                 </tr>
               ) : (

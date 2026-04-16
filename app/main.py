@@ -13,7 +13,7 @@ from app.models import (  # noqa: F401 — register models
     CoverageReport, SalesData, BudgetData,
 )
 from app.api import auth, users, emails, attachments, zso, dashboard, master_data
-from app.api import demand, inventory, coverage, performance
+from app.api import demand, inventory, coverage, performance, uploads
 from app.utils.config import get_settings
 from app.utils.logging import logger
 
@@ -61,6 +61,7 @@ app.include_router(demand.router)
 app.include_router(inventory.router)
 app.include_router(coverage.router)
 app.include_router(performance.router)
+app.include_router(uploads.router)
 
 
 # ──────────────────────────────────────────────

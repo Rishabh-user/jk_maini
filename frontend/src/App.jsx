@@ -12,6 +12,7 @@ import DemandManagement from './pages/DemandManagement'
 import InventoryLiquidation from './pages/InventoryLiquidation'
 import CoverageReport from './pages/CoverageReport'
 import PerformanceDashboard from './pages/PerformanceDashboard'
+import UploadDocument from './pages/UploadDocument'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
@@ -51,6 +52,7 @@ export default function App() {
         <Route path="/inventory-liquidation" element={<InventoryLiquidation />} />
         <Route path="/coverage-report" element={<CoverageReport />} />
         <Route path="/performance" element={<PerformanceDashboard />} />
+        <Route path="/upload-document" element={<UploadDocument />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
