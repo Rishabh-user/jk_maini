@@ -67,10 +67,12 @@ export default function EmailInbox() {
     }
   }
 
+  // Filter out manual uploads and apply search
   const filtered = emails.filter(
     (e) =>
-      (e.subject || '').toLowerCase().includes(search.toLowerCase()) ||
-      (e.sender || '').toLowerCase().includes(search.toLowerCase())
+      !(e.gmail_message_id || '').startsWith('manual-upload-') &&
+      ((e.subject || '').toLowerCase().includes(search.toLowerCase()) ||
+      (e.sender || '').toLowerCase().includes(search.toLowerCase()))
   )
 
   if (loading) {

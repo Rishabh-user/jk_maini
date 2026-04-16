@@ -15,10 +15,10 @@ const FILE_ICONS = {
 }
 
 const STATUS_CONFIG = {
-  PROCESSED: { label: 'Processed', color: 'bg-green-100 text-green-700', icon: CheckCircle2 },
-  UNPROCESSED: { label: 'Uploaded', color: 'bg-yellow-100 text-yellow-700', icon: Clock },
-  PROCESSING: { label: 'Processing', color: 'bg-blue-100 text-blue-700', icon: Loader2 },
-  FAILED: { label: 'Failed', color: 'bg-red-100 text-red-700', icon: XCircle },
+  processed: { label: 'Processed', color: 'bg-green-100 text-green-700', icon: CheckCircle2 },
+  unprocessed: { label: 'Uploaded', color: 'bg-yellow-100 text-yellow-700', icon: Clock },
+  processing: { label: 'Processing', color: 'bg-blue-100 text-blue-700', icon: Loader2 },
+  failed: { label: 'Failed', color: 'bg-red-100 text-red-700', icon: XCircle },
 }
 
 export default function UploadDocument() {
@@ -254,19 +254,19 @@ export default function UploadDocument() {
         <div className="bg-white rounded-xl border border-gray-200 p-4">
           <p className="text-xs font-medium text-gray-500">Processed</p>
           <p className="text-2xl font-bold text-green-600 mt-1">
-            {uploads.filter((u) => u.status === 'PROCESSED').length}
+            {uploads.filter((u) => (u.status || '').toLowerCase() === 'processed').length}
           </p>
         </div>
         <div className="bg-white rounded-xl border border-gray-200 p-4">
           <p className="text-xs font-medium text-gray-500">Pending</p>
           <p className="text-2xl font-bold text-yellow-600 mt-1">
-            {uploads.filter((u) => u.status === 'UNPROCESSED').length}
+            {uploads.filter((u) => (u.status || '').toLowerCase() === 'unprocessed').length}
           </p>
         </div>
         <div className="bg-white rounded-xl border border-gray-200 p-4">
           <p className="text-xs font-medium text-gray-500">Failed</p>
           <p className="text-2xl font-bold text-red-600 mt-1">
-            {uploads.filter((u) => u.status === 'FAILED').length}
+            {uploads.filter((u) => (u.status || '').toLowerCase() === 'failed').length}
           </p>
         </div>
       </div>
@@ -316,7 +316,7 @@ export default function UploadDocument() {
               ) : (
                 filteredUploads.map((upload) => {
                   const FileIcon = FILE_ICONS[upload.source_type] || File
-                  const statusCfg = STATUS_CONFIG[upload.status] || STATUS_CONFIG.UNPROCESSED
+                  const statusCfg = STATUS_CONFIG[(upload.status || '').toLowerCase()] || STATUS_CONFIG.unprocessed
                   const StatusIcon = statusCfg.icon
                   const isExpanded = expandedRow === upload.id
 
@@ -342,7 +342,7 @@ export default function UploadDocument() {
                         </td>
                         <td className="px-4 py-3">
                           <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${statusCfg.color}`}>
-                            <StatusIcon size={12} className={upload.status === 'PROCESSING' ? 'animate-spin' : ''} />
+                            <StatusIcon size={12} className={(upload.status || '').toLowerCase() === 'processing' ? 'animate-spin' : ''} />
                             {statusCfg.label}
                           </span>
                         </td>
@@ -351,7 +351,7 @@ export default function UploadDocument() {
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-1">
-                            {upload.status === 'PROCESSED' && upload.attachment_id && (
+                            {(upload.status || '').toLowerCase() === 'processed' && upload.attachment_id && (
                               <button
                                 onClick={() => toggleRawData(upload)}
                                 className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-blue-600 border border-blue-200 rounded hover:bg-blue-50"
@@ -361,7 +361,7 @@ export default function UploadDocument() {
                                 {isExpanded ? 'Hide' : 'View'}
                               </button>
                             )}
-                            {(upload.status === 'UNPROCESSED' || upload.status === 'FAILED') && (
+                            {((upload.status || '').toLowerCase() === 'unprocessed' || (upload.status || '').toLowerCase() === 'failed') && (
                               <button
                                 onClick={() => handleProcess(upload.id)}
                                 className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-green-600 border border-green-200 rounded hover:bg-green-50"

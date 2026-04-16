@@ -21,8 +21,10 @@ export default function RawDataViewer() {
         const emails = emailsRes.data.emails || []
         const atts = []
         for (const email of emails) {
-          if (email.status !== 'PROCESSED') continue
-          const isManual = email.gmail_message_id?.startsWith('manual-upload-')
+          // Include only processed emails (case-insensitive check)
+          const status = (email.status || '').toLowerCase()
+          if (status !== 'processed') continue
+          const isManual = (email.gmail_message_id || '').startsWith('manual-upload-')
           for (const att of email.attachments || []) {
             atts.push({
               id: att.id,
