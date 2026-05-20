@@ -100,7 +100,7 @@ export default function RawDataViewer() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Raw Data Viewer</h1>
         <p className="text-sm text-gray-500 mt-1">
-          AI-extracted data from email attachments & manual uploads ({attachments.length} files, {rawEntries.length} rows)
+          Extracted data from email attachments & manual uploads ({attachments.length} files, {rawEntries.length} rows)
         </p>
       </div>
 

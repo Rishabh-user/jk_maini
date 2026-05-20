@@ -439,7 +439,7 @@ function RawDataPreview({ uploadId, data, loading }) {
         <div className="flex items-center gap-2">
           <Sparkles size={14} className="text-blue-500" />
           <span className="text-xs font-semibold text-blue-700">
-            AI-Extracted Data — {data.length} rows, {columns.length} columns
+            Extracted Data — {data.length} rows, {columns.length} columns
           </span>
         </div>
         <div className="flex items-center gap-2 text-xs text-gray-500">
