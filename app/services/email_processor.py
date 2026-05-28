@@ -1,3 +1,5 @@
+import os
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -5,11 +7,14 @@ from app.models.email import Email, EmailStatus, Attachment
 from app.models.data import RawData
 from app.services.file_parser import FileParser
 from app.services.ai_mapping import map_columns_with_ai
+from app.utils.config import get_settings
 from app.utils.logging import logger
+
+settings = get_settings()
 
 
 async def process_email(db: AsyncSession, email_id: int) -> dict:
-    """Full pipeline: parse attachments -> AI map columns -> store raw data."""
+    """Full pipeline: parse body/attachments -> AI map columns -> store raw data."""
     result = await db.execute(select(Email).where(Email.id == email_id))
     email = result.scalar_one_or_none()
 
@@ -35,7 +40,11 @@ async def process_email(db: AsyncSession, email_id: int) -> dict:
         att_result = await db.execute(
             select(Attachment).where(Attachment.email_id == email.id)
         )
-        attachments = att_result.scalars().all()
+        attachments = list(att_result.scalars().all())
+
+        body_attachment = await _ensure_body_attachment(db, email, attachments)
+        if body_attachment:
+            attachments.append(body_attachment)
 
         for attachment in attachments:
             try:
@@ -106,5 +115,39 @@ def _get_source_type(filename: str) -> str:
         "jpeg": "image",
         "tiff": "image",
         "bmp": "image",
+        "txt": "email_body",
+        "text": "email_body",
     }
     return type_map.get(ext, "unknown")
+
+
+async def _ensure_body_attachment(
+    db: AsyncSession,
+    email: Email,
+    attachments: list[Attachment],
+) -> Attachment | None:
+    body = (email.body or "").strip()
+    if not body:
+        return None
+
+    for attachment in attachments:
+        if attachment.filename == "email_body.txt":
+            return None
+
+    email_dir = os.path.join(settings.UPLOAD_DIR, str(email.id))
+    os.makedirs(email_dir, exist_ok=True)
+    file_path = os.path.join(email_dir, "email_body.txt")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(body)
+
+    attachment = Attachment(
+        email_id=email.id,
+        filename="email_body.txt",
+        content_type="text/plain",
+        file_path=file_path,
+        file_size=os.path.getsize(file_path),
+    )
+    db.add(attachment)
+    await db.flush()
+    logger.info(f"Created body attachment for email id={email.id}")
+    return attachment

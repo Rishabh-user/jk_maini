@@ -111,7 +111,8 @@ export default function UploadDocument() {
       const entries = res.data || []
       const allRows = []
       for (const entry of entries) {
-        const rows = entry.extracted_data?.rows || []
+        const extracted = entry.extracted_data || {}
+        const rows = extracted.rows || []
         allRows.push(...rows)
       }
       setRawData((prev) => ({ ...prev, [id]: allRows }))
@@ -429,7 +430,12 @@ function RawDataPreview({ uploadId, data, loading }) {
     )
   }
 
-  const columns = Object.keys(data[0])
+  const columns = Array.from(
+    data.reduce((set, row) => {
+      Object.keys(row || {}).forEach((k) => set.add(k))
+      return set
+    }, new Set())
+  )
   const totalPages = Math.ceil(data.length / PAGE_SIZE)
   const paginated = data.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
