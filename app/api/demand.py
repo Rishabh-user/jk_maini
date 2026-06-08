@@ -83,34 +83,47 @@ async def compare_demand(
     if not prev_report:
         raise HTTPException(status_code=404, detail="Previous report not found")
 
-    curr_items = {item.get("cust_part_no", item.get("customer_part_no", "")): item
-                  for item in (curr_report.report_data or {}).get("items", [])}
-    prev_items = {item.get("cust_part_no", item.get("customer_part_no", "")): item
-                  for item in (prev_report.report_data or {}).get("items", [])}
+    curr_raw = (curr_report.report_data or {}).get("items", [])
+    prev_raw = (prev_report.report_data or {}).get("items", [])
+
+    # Use row_id (deterministic UUID) for matching when available — more precise
+    # than part number alone (handles multiple delivery dates / POs per part).
+    # Fall back to cust_part_no for older reports that predate UUID stamping.
+    def _item_key(item: dict) -> str:
+        row_id = item.get("row_id", "")
+        if row_id:
+            return row_id
+        return item.get("cust_part_no", item.get("customer_part_no", ""))
+
+    curr_items = {_item_key(item): item for item in curr_raw if _item_key(item)}
+    prev_items = {_item_key(item): item for item in prev_raw if _item_key(item)}
 
     increases = []
     decreases = []
     new_items = []
     removed_items = []
 
-    for part, curr in curr_items.items():
-        if not part:
+    for key, curr in curr_items.items():
+        if not key:
             continue
         curr_qty = float(curr.get("open_qty", curr.get("quantity", 0)) or 0)
-        if part in prev_items:
-            prev_qty = float(prev_items[part].get("open_qty", prev_items[part].get("quantity", 0)) or 0)
+        part = curr.get("cust_part_no", curr.get("customer_part_no", key))
+        if key in prev_items:
+            prev = prev_items[key]
+            prev_qty = float(prev.get("open_qty", prev.get("quantity", 0)) or 0)
             diff = curr_qty - prev_qty
             if diff > 0:
-                increases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff})
+                increases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
             elif diff < 0:
-                decreases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff})
+                decreases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
         else:
-            new_items.append({"part": part, "customer": curr.get("customer_name", ""), "qty": curr_qty})
+            new_items.append({"part": part, "customer": curr.get("customer_name", ""), "qty": curr_qty, "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
 
-    for part, prev in prev_items.items():
-        if part and part not in curr_items:
+    for key, prev in prev_items.items():
+        if key and key not in curr_items:
             prev_qty = float(prev.get("open_qty", prev.get("quantity", 0)) or 0)
-            removed_items.append({"part": part, "customer": prev.get("customer_name", ""), "qty": prev_qty})
+            part = prev.get("cust_part_no", prev.get("customer_part_no", key))
+            removed_items.append({"part": part, "customer": prev.get("customer_name", ""), "qty": prev_qty, "po": prev.get("po_forecast", ""), "ship_date": prev.get("ship_date", ""), "row_id": key})
 
     return {
         "increases": increases,

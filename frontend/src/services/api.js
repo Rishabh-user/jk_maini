@@ -85,8 +85,12 @@ export const generateZSO = (emailId) =>
   api.post('/zso/generate', { email_id: emailId })
 export const fetchZSOReports = () => api.get('/zso/')
 export const fetchZSOById = (id) => api.get(`/zso/${id}`)
-export const exportZSO = (id) =>
-  api.post(`/zso/export/${id}`, {}, { responseType: 'blob' })
+export const exportZSO = (id, visibleColumns = null) =>
+  api.post(
+    `/zso/export/${id}`,
+    visibleColumns ? visibleColumns : null,   // send column list as JSON body when provided
+    { responseType: 'blob' }
+  )
 export const mapColumns = (sourceColumns) =>
   api.post('/zso/map-columns', { source_columns: sourceColumns })
 

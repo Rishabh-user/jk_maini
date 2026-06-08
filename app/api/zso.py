@@ -116,7 +116,14 @@ async def export_zso(
     report_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.KAS)),
+    visible_columns: list[str] | None = None,
 ):
+    """Export ZSO report as Excel.
+
+    Pass `visible_columns` (list of frontend camelCase field names) to restrict
+    the export to only the columns currently shown in the UI.  When omitted all
+    columns are exported.
+    """
     result = await db.execute(select(ZSOReport).where(ZSOReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
@@ -125,7 +132,7 @@ async def export_zso(
     if not report.report_data:
         raise HTTPException(status_code=400, detail="No report data to export")
 
-    filepath = export_zso_to_excel(report.report_data)
+    filepath = export_zso_to_excel(report.report_data, visible_columns=visible_columns or None)
     if not filepath:
         raise HTTPException(status_code=500, detail="Export failed — no data")
 

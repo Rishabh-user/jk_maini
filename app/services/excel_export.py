@@ -15,6 +15,7 @@ COLUMNS_ORDER = [
     "category", "sub_category", "cust_part_no", "maini_part_no",
     "open_qty", "unit_price", "currency", "unit_price_inr",
     "total_inr", "doc_date", "ship_date", "sales_month",
+    "row_id",   # deterministic UUID — last column, for reference / change-tracking
 ]
 DISPLAY_HEADERS = {
     "sr_no": "S No",
@@ -37,6 +38,7 @@ DISPLAY_HEADERS = {
     "doc_date": "Doc Date",
     "ship_date": "Ship Date",
     "sales_month": "Sales Month",
+    "row_id": "Row ID",
 }
 
 
@@ -91,7 +93,11 @@ def _expand_forecast_rows(items: list[dict]) -> list[dict]:
     return expanded
 
 
-def export_zso_to_excel(zso_data: dict, output_dir: str | None = None) -> str:
+def export_zso_to_excel(
+    zso_data: dict,
+    output_dir: str | None = None,
+    visible_columns: list[str] | None = None,
+) -> str:
     """Generate a formatted Excel file from ZSO report data.
 
     Forecast rows that carry a forecast_schedule are expanded into one row
@@ -116,7 +122,26 @@ def export_zso_to_excel(zso_data: dict, output_dir: str | None = None) -> str:
         logger.info(f"Export: expanded forecast rows → {len(items)} total rows (was {len(raw_items)})")
 
     df = pd.DataFrame(items)
-    df = df[[c for c in COLUMNS_ORDER if c in df.columns]]
+    # Apply column visibility filter if provided (from the frontend Columns panel)
+    if visible_columns:
+        # visible_columns uses frontend camelCase field names → map to snake_case DB keys
+        _frontend_to_backend = {
+            "srNo": "sr_no", "kasName": "kas_name", "customerName": "customer_name",
+            "siteLocation": "site_location", "country": "country", "incoterm": "incoterm",
+            "directSalesWh": "direct_sales_wh_movement", "poForecast": "po_forecast",
+            "category": "category", "subCategory": "sub_category",
+            "custPart": "cust_part_no", "mainiPart": "maini_part_no",
+            "openQty": "open_qty", "unitPrice": "unit_price", "currency": "currency",
+            "unitPriceInr": "unit_price_inr", "totalInr": "total_inr",
+            "docDate": "doc_date", "shipDate": "ship_date", "salesMonth": "sales_month",
+            "rowId": "row_id",
+        }
+        backend_cols = [_frontend_to_backend.get(c, c) for c in visible_columns]
+        # Always keep sr_no; filter COLUMNS_ORDER to only include visible ones
+        ordered = ["sr_no"] + [c for c in COLUMNS_ORDER if c != "sr_no" and c in backend_cols]
+    else:
+        ordered = COLUMNS_ORDER
+    df = df[[c for c in ordered if c in df.columns]]
     df.rename(columns=DISPLAY_HEADERS, inplace=True)
 
     with pd.ExcelWriter(filepath, engine="openpyxl") as writer:

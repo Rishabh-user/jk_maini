@@ -33,6 +33,7 @@ def _build_zso_item(row: dict, sr_no: int, kas_name: str, open_qty: float,
     line_total_inr = open_qty * unit_price_inr
 
     item = {
+        "row_id": row.get("_row_id", ""),   # deterministic UUID from source row
         "sr_no": sr_no,
         "kas_name": kas_name,
         "customer_name": row.get("Customer Name", ""),

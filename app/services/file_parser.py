@@ -18,17 +18,62 @@ settings = get_settings()
 pytesseract.pytesseract.tesseract_cmd = settings.TESSERACT_CMD
 
 _CANONICAL_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
-    "item_no": ("item no", "item number", "item #", "line no", "line", "sl no", "sno", "item"),
-    "material": ("material", "part no", "part number", "part #", "customer part", "item material", "drawing no"),
-    "description": ("description", "desc", "item description", "discription"),
-    "quantity": ("quantity", "qty", "outstanding receipt", "ordered", "open qty"),
-    "uom": ("uom", "um", "unit of measure"),
-    "unit_price": ("unit price", "net price", "price w/o", "price/ea", "unit net", "/ea"),
-    "total_price": ("total price", "total w/", "total amount", "line total"),
-    "delivery_date": ("delivery date", "due date", "vendor due date", "need by"),
-    "po_number": ("po number", "po no", "po #", "purchase order", " po"),
-    "reference": ("reference", "ref no", "contract"),
-    "vendor": ("vendor", "vendor name", "supplier"),
+    "item_no": (
+        "item no", "item number", "item #", "line no", "line number", "line",
+        "sl no", "sl.", "sno", "item", "position", "pos",
+    ),
+    "material": (
+        "material", "part no", "part number", "part #", "customer part", "item material",
+        "drawing no", "drawing number", "vendor item", "vendor part", "supplier item",
+        "supplier part", "your material", "your material reference",
+        # French / multilingual
+        "référence", "reference article", "réf article", "article", "n° article",
+        "pièce", "piece",
+    ),
+    "description": (
+        "description", "desc", "item description", "discription", "part description",
+        "article description", "item spec", "specification",
+        # French
+        "désignation", "designation", "libelle", "libellé",
+    ),
+    "quantity": (
+        "quantity", "qty", "outstanding receipt", "ordered", "open qty",
+        "rem. qty", "remaining qty", "remaining quantity", "po quantity",
+        "order qty", "ordered qty", "outstanding qty", "ostd qty",
+        # French
+        "quantité", "qté", "quantite", "qte",
+    ),
+    "uom": (
+        "uom", "um", "unit of measure", "u/m", "unit",
+        # French
+        "unité", "unite",
+    ),
+    "unit_price": (
+        "unit price", "net price", "price w/o", "price/ea", "unit net", "/ea",
+        "pre-tax unit price", "price per unit", "unit cost",
+        # French
+        "prix unitaire", "prix u.", "p.u.", "prix",
+    ),
+    "total_price": (
+        "total price", "total w/", "total amount", "line total", "total price",
+        "extended price", "ext. price",
+    ),
+    "delivery_date": (
+        "delivery date", "due date", "vendor due date", "need by",
+        "wanted delivery date", "required delivery date", "requested delivery date",
+        "dock date", "ship date", "required date", "required by",
+        # French
+        "date livraison", "date de livraison", "dt livraison", "date d'envoi",
+    ),
+    "po_number": (
+        "po number", "po no", "po #", "purchase order", " po",
+        "order number", "order no", "order ref", "order reference",
+        "po no.", "p.o. number", "p.o. no",
+        # French
+        "commande", "n° commande", "numéro commande", "bon de commande",
+    ),
+    "reference": ("reference", "ref no", "contract", "contract no"),
+    "vendor": ("vendor", "vendor name", "supplier", "supplier name"),
     "line_status": ("line status", "status"),
 }
 
@@ -38,8 +83,10 @@ _NOISE_HEADER_MARKERS = (
     "external email",
     "do not open",
     "bcc:",
-    "order reschedule--maini",
+    # "order reschedule--maini" removed — company-specific, breaks generic layouts
     "comes from a known",
+    "do not reply",
+    "unsubscribe",
 )
 _FOOTER_ROW_MARKERS = (
     "vat amount",
@@ -51,16 +98,24 @@ _FOOTER_ROW_MARKERS = (
     "contractual data",
     "page ",
     "www.",
-    "sasu au capital",
+    # Generic legal entity footer markers (replaces company-specific "sasu au capital")
+    "au capital de",       # French: "with capital of X euros"
+    "s.a.s.u",            # French company type abbreviation
+    "s.a.r.l",            # French company type
+    "registered office",  # English company footer
+    "rcs ",               # French company registry
+    "inc. all rights",    # English corporate footer
     "terms and conditions",
+    "general conditions",
     "item material quantity unit",
-    "sub total", 
+    "sub total",
     "subtotal",
     "prepaid amount",
     "prepaid a",
     "total: us",
     "total: usd",
     "line gross amount",
+    "net value",          # Generic order total marker
 )
 _DISPLAY_TABLE_TYPES = frozenset({"line_items", "schedule", "other"}) 
 
@@ -530,17 +585,179 @@ class FileParser:
                 break
 
         # Priority 3 — company name appearing just before 'Page X/Y' in page header
+        # Requires: short candidate (≤ 6 words), no supplier/vendor/number keywords,
+        # no colon (which would indicate it's a label:value pair, not a company name)
         page_hdr_re = re.compile(r"(.+?)\s+Page\s+\d+\s*/\s*\d+", re.I)
+        _page_hdr_reject = re.compile(
+            r"(?:supplier|vendor|your\s|number|n[°o][\.\s]|address|invoice|order|:\s*\S)", re.I
+        )
         for line in lines[:15]:
             m = page_hdr_re.search(line)
             if m:
                 candidate = m.group(1).strip()
-                if 4 < len(candidate) < 100 and not _doc_type_re.search(candidate):
+                word_count = len(candidate.split())
+                if (
+                    4 < len(candidate) < 80
+                    and word_count <= 6
+                    and not _doc_type_re.search(candidate)
+                    and not _page_hdr_reject.search(candidate)
+                ):
                     metadata["customer_name"] = candidate
                     logger.info(f"Extracted PDF customer name from page header: '{candidate}'")
                     return metadata
 
         return metadata
+
+    @staticmethod
+    def _extract_generic_pdf_metadata(text: str) -> dict:
+        """Extract document-level fields from PDF text using generic semantic patterns.
+
+        No company-specific strings — works for any PO / schedule / invoice document.
+        Fields extracted: PO Number, PO Date, Currency, Incoterm.
+        These are stamped on rows that don't already carry them so that documents
+        where PO info lives in a header area (separate from the item table) still
+        produce complete rows.
+        """
+        meta: dict = {}
+        # Only scan the first ~3000 chars where document headers appear
+        head = text[:3000]
+
+        # PO / Order Number — handles: "PO: 12345", "Purchase Order No. ABC-123",
+        # "P.O. #8423", "Order N° SNZR000189", "PO Number 25PO000957", etc.
+        # Key: consume the FULL label word ("Number", "No.", "N°") before capturing value,
+        # so "PO N[umber]" doesn't leave "umber" as the captured group.
+        po_re = re.compile(
+            r'(?<!\w)'                           # not preceded by a word char (prevents matching "25PO...")
+            r'(?:purchase\s+order|p\.?\s*o\.?)'
+            r'\s*(?:n(?:umber|o\.?|[°])|#)?\s*'  # optional: "number", "no.", "N°", "#"
+            r'[:\-]?\s*'
+            r'([A-Z0-9][\w\-/\.]{3,25})',
+            re.I,
+        )
+        m = po_re.search(head)
+        if m:
+            candidate = m.group(1).strip().rstrip(".")
+            # Skip generic words that match the pattern but aren't PO numbers
+            if not re.match(r'^(number|no|date|version|page|ref|contact|terms|company|vendor)$', candidate, re.I):
+                meta["PO Number"] = candidate
+
+        # Document Date
+        date_re = re.compile(
+            r'(?:purchase\s+order|p\.?o\.?|order|document?|doc\.?)'
+            r'\s*(?:date|dated?)\s*[:\-]?\s*'
+            r'(\d{1,2}[.\/\-]\d{1,2}[.\/\-]\d{2,4}'
+            r'|\w{3,9}\s*/\s*\d{1,2}\s*/\s*\d{4}'  # "May/28/2025"
+            r'|\d{2}\s+\w{3}\s+\d{4})',             # "28 May 2025"
+            re.I,
+        )
+        m = date_re.search(head)
+        if m:
+            meta["PO Date"] = m.group(1).strip()
+
+        # Currency — first explicit occurrence in header
+        currency_re = re.compile(
+            r'(?:currency\s*[:\-]?\s*|\b)(USD|EUR|GBP|INR|JPY|AED|SGD|AUD|CAD|CHF|CNY|CZK|PLN|SEK)\b',
+            re.I,
+        )
+        m = currency_re.search(head)
+        if m:
+            meta["Currency"] = m.group(1).upper()
+
+        # Incoterms
+        incoterm_re = re.compile(r'\b(EXW|FOB|CIF|CFR|DAP|DDP|FCA|CPT|CIP|DPU|FAS|DAT)\b')
+        m = incoterm_re.search(head)
+        if m:
+            meta["Incoterm"] = m.group(1).upper()
+
+        return meta
+
+    @staticmethod
+    def _parse_generic_text_table(text: str) -> list[dict]:
+        """Generic text-based table parser for structured PO/schedule documents.
+
+        Finds a header row containing 3+ business keywords, then parses
+        subsequent data rows using column-position alignment.  Works for
+        documents like SEKO POs where items appear as whitespace-aligned text
+        rather than as pdfplumber-extractable tables.
+
+        No company-specific strings — keyword-driven only.
+        """
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            return []
+
+        _HEADER_KEYWORDS = (
+            "description", "drawing", "delivery", "quantity", "qty", "price",
+            "unit", "total", "part", "material", "item", "date",
+            # French equivalents
+            "désignation", "quantité", "livraison", "prix",
+        )
+        _DATA_MIN_KEYWORDS = 3  # header line must have at least this many keyword hits
+
+        # Find the header line
+        header_line_idx: int | None = None
+        for i, line in enumerate(lines[:40]):
+            norm = line.lower()
+            hits = sum(1 for kw in _HEADER_KEYWORDS if kw in norm)
+            if hits >= _DATA_MIN_KEYWORDS:
+                header_line_idx = i
+                break
+
+        if header_line_idx is None:
+            return []
+
+        header_line = lines[header_line_idx]
+
+        # Build column spans from the header line's word positions
+        # Each word in the header defines a column whose start position is
+        # the word's x-offset in the string.
+        header_words = list(re.finditer(r'\S+(?:\s+\S+)*?(?=\s{2,}|$)', header_line))
+        if len(header_words) < 3:
+            # Fallback: split on 2+ spaces
+            parts = re.split(r'\s{2,}', header_line.strip())
+            if len(parts) < 3:
+                return []
+            col_names = [FileParser._clean_cell(p) for p in parts]
+            col_starts = None
+        else:
+            col_names = [FileParser._clean_cell(m.group(0)) for m in header_words]
+            col_starts = [m.start() for m in header_words]
+
+        _STOP_WORDS = ("total", "subtotal", "net value", "net total", "vat", "tax", "www.", "http")
+
+        rows: list[dict] = []
+        for line in lines[header_line_idx + 1:]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            low = stripped.lower()
+            if any(sw in low for sw in _STOP_WORDS) and len(stripped) < 60:
+                break
+            if not re.search(r'\d', stripped):
+                continue  # data rows always have at least one number
+
+            if col_starts:
+                # Positional split using header column x-offsets
+                values = []
+                for j, start in enumerate(col_starts):
+                    end = col_starts[j + 1] if j + 1 < len(col_starts) else len(line) + 50
+                    cell = line[start:end].strip() if start < len(line) else ""
+                    values.append(FileParser._clean_cell(cell))
+            else:
+                # Space-delimited split
+                raw_parts = re.split(r'\s{2,}', stripped)
+                values = [FileParser._clean_cell(p) for p in raw_parts]
+
+            if len(values) < 2:
+                continue
+            # Pad / truncate to match column count
+            if len(values) < len(col_names):
+                values += [""] * (len(col_names) - len(values))
+            row = {col_names[k]: values[k] for k in range(len(col_names))}
+            if not FileParser._is_low_information_row(row):
+                rows.append(row)
+
+        return rows
 
     @staticmethod
     def parse_pdf(file_path: str) -> dict:
@@ -583,6 +800,13 @@ class FileParser:
         if po_rows:
             raw_candidates.append(
                 FileParser._make_candidate("doc_po_pattern", "pdf_text_po_pattern", po_rows, page_no=0)
+            )
+        # Generic text-table strategy — handles any structured text layout
+        # where pdfplumber table extraction fails (e.g. SEKO-style POs)
+        generic_rows = FileParser._parse_generic_text_table(full_text)
+        if generic_rows:
+            raw_candidates.append(
+                FileParser._make_candidate("doc_generic_text", "pdf_text_generic_table", generic_rows, page_no=0)
             )
 
         scored_tables: list[dict] = []
@@ -632,6 +856,22 @@ class FileParser:
             }
 
         file_metadata = FileParser._extract_pdf_metadata(full_text)
+
+        # Extract document-level metadata (PO#, date, currency, incoterm) from full text
+        # and stamp onto any row that doesn't already carry these fields.
+        # This links document header info (separate table / text block) to every line item.
+        doc_meta = FileParser._extract_generic_pdf_metadata(full_text)
+        if doc_meta:
+            for row in primary["rows"]:
+                for field, value in doc_meta.items():
+                    if value and not row.get(field):
+                        row[field] = value
+            # Ensure extracted columns list includes new fields that were stamped
+            for field in doc_meta:
+                if doc_meta[field] and field not in primary["columns"]:
+                    primary["columns"].append(field)
+            if doc_meta:
+                logger.info(f"Stamped doc metadata on {len(primary['rows'])} rows: {list(doc_meta.keys())}")
 
         logger.info(
             f"PDF parsed final: primary={primary['table_id']} type={primary['table_type']} "
@@ -1029,6 +1269,8 @@ class FileParser:
             score += 8.0
         if strategy == "pdf_text_headered_line_items":
             score += 6.0
+        if strategy == "pdf_text_generic_table":
+            score += 3.0  # lower than specific strategies; only wins when others fail
 
         if {"item_no", "quantity"} <= canonical:
             score += 2.0
@@ -1219,6 +1461,7 @@ class FileParser:
             "pdf_text_headered_line_items",
             "pdf_text_airsupply_po",
             "pdf_text_po_pattern",
+            "pdf_text_generic_table",
         }
 
         def rank_key(t: dict) -> tuple:
@@ -1488,9 +1731,11 @@ class FileParser:
             "net total",
             "vat amount",
             "total incl",
-            "terms \"buyer\"",
-            "the terms \"buyer\"",
-            "safran aerospace composites",
+            # Generic legal-text markers (no company names)
+            "general conditions",
+            "general purchase conditions",
+            "terms and conditions",
+            "the applicable",
             "www.",
         )
 
@@ -1791,8 +2036,14 @@ class FileParser:
         try:
             with pdfplumber.open(file_path) as pdf:
                 for page in pdf.pages:
-                    page_image = page.to_image(resolution=300).original
-                    page_text = pytesseract.image_to_string(page_image) or ""
+                    try:
+                        page_image = page.to_image(resolution=300).original
+                        # Ensure bytes are decoded safely regardless of source encoding
+                        raw = pytesseract.image_to_string(page_image)
+                        page_text = raw.encode("utf-8", errors="replace").decode("utf-8") if raw else ""
+                    except Exception as page_err:
+                        logger.warning(f"OCR failed on page: {page_err}")
+                        page_text = ""
                     texts.append(page_text)
                     rows.extend(FileParser._parse_delimited_or_line_item_text(page_text))
         except Exception as e:

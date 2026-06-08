@@ -25,6 +25,7 @@ SYSTEM_SCHEMA_COLUMNS = [
 ]
 
 EXACT_COLUMN_MAP = {
+    # ── Customer Part # ──────────────────────────────────────────────────
     "material": "Customer Part #",
     "customer material": "Customer Part #",
     "customer material no": "Customer Part #",
@@ -33,6 +34,17 @@ EXACT_COLUMN_MAP = {
     "customer part #": "Customer Part #",
     "customer part no": "Customer Part #",
     "customer part number": "Customer Part #",
+    "part number / eng rev": "Customer Part #",
+    "part no": "Customer Part #",
+    "part number": "Customer Part #",
+    # French / other languages
+    "référence": "Customer Part #",
+    "reference article": "Customer Part #",
+    "réf article": "Customer Part #",
+    "article": "Customer Part #",
+    "n° article": "Customer Part #",
+    "pièce": "Customer Part #",
+    # ── Maini Part # ─────────────────────────────────────────────────────
     "f part": "Maini Part #",
     "f part #": "Maini Part #",
     "f part no": "Maini Part #",
@@ -41,34 +53,97 @@ EXACT_COLUMN_MAP = {
     "maini part #": "Maini Part #",
     "maini part no": "Maini Part #",
     "maini part number": "Maini Part #",
+    "vendor item": "Maini Part #",   # vendor = Maini; vendor's item = Maini part #
+    "vendor part": "Maini Part #",
+    "supplier item": "Maini Part #",
+    "supplier part": "Maini Part #",
+    "your material reference": "Maini Part #",
+    # ── Description ──────────────────────────────────────────────────────
     "desc": "Description",
     "description": "Description",
     "discription": "Description",
     "material description": "Description",
+    "item description": "Description",
+    "item spec": "Description",
+    # French
+    "désignation": "Description",
+    "designation": "Description",
+    "libelle": "Description",
+    "libellé": "Description",
+    # ── Quantity ─────────────────────────────────────────────────────────
     "ostd qty": "Quantity",
     "outstanding qty": "Quantity",
     "open qty": "Quantity",
     "initial qty": "Quantity",
     "quantity": "Quantity",
     "qty": "Quantity",
+    "rem. qty": "Quantity",
+    "remaining qty": "Quantity",
+    "remaining quantity": "Quantity",
+    "po quantity": "Quantity",
+    "order qty": "Quantity",
+    "ordered qty": "Quantity",
+    # French
+    "quantité": "Quantity",
+    "qté": "Quantity",
+    "quantite": "Quantity",
+    "qte": "Quantity",
+    # ── Unit Price ───────────────────────────────────────────────────────
     "net price": "Unit Price",
     "unit price": "Unit Price",
     "unit price per pc": "Unit Price",
+    "pre-tax unit price": "Unit Price",
+    "price per unit": "Unit Price",
+    "unit cost": "Unit Price",
     "price": "Unit Price",
+    # French
+    "prix unitaire": "Unit Price",
+    "prix u.": "Unit Price",
+    "p.u.": "Unit Price",
+    "prix": "Unit Price",
+    # ── Currency ─────────────────────────────────────────────────────────
     "curr": "Currency",
     "currency": "Currency",
+    # ── PO Number ────────────────────────────────────────────────────────
     "purchase order": "PO Number",
     "po number": "PO Number",
     "po no": "PO Number",
+    "po no.": "PO Number",
     "po": "PO Number",
+    "po #": "PO Number",
+    "order number": "PO Number",
+    "order no": "PO Number",
+    "order ref": "PO Number",
+    "order reference": "PO Number",
+    # French
+    "commande": "PO Number",
+    "n° commande": "PO Number",
+    "numéro commande": "PO Number",
+    "bon de commande": "PO Number",
+    # ── Delivery Date ────────────────────────────────────────────────────
     "requested delivery date": "Delivery Date",
     "delivery date": "Delivery Date",
     "ship date": "Delivery Date",
+    "wanted delivery date": "Delivery Date",
+    "required delivery date": "Delivery Date",
+    "dock date": "Delivery Date",
+    "required date": "Delivery Date",
+    "required by": "Delivery Date",
+    "due date": "Delivery Date",
+    # French
+    "date livraison": "Delivery Date",
+    "date de livraison": "Delivery Date",
+    "dt livraison": "Delivery Date",
+    # ── PO Date ──────────────────────────────────────────────────────────
     "po date": "PO Date",
     "doc date": "PO Date",
+    "order date": "PO Date",
+    "document date": "PO Date",
+    # ── Remarks ──────────────────────────────────────────────────────────
     "supplier comments": "Remarks",
     "comments": "Remarks",
     "remarks": "Remarks",
+    "status": "Remarks",      # LATE/FIRM/PREV from SYLK/SLK files
     "supplier commitment date": "UNMAPPED",
     "statistic date": "UNMAPPED",
     "supplier description": "UNMAPPED",

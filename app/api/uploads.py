@@ -1,5 +1,6 @@
 import os
 import re
+import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy import select, func
@@ -18,9 +19,36 @@ from app.utils.logging import logger
 settings = get_settings()
 router = APIRouter(prefix="/uploads", tags=["Document Upload"])
 
-# Matches column names that are ISO-date-like (e.g. "2026-10-26" or "2026-10-26 00:00:00")
-# These come from SAP/forecast Excel files where date headers represent weekly demand buckets.
+# Matches column names that represent date/period forecast buckets:
+#   ISO dates   : "2026-10-26", "2026-10-26 00:00:00"  (SAP weekly columns)
+#   Month-year  : "Aug. 2025", "Sep 2025", "August 2025"  (ASCO monthly columns)
 _DATE_COL_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}")
+_MONTH_COL_RE = re.compile(
+    r"^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{4}$",
+    re.I,
+)
+
+
+def _compute_row_id(row: dict, index: int) -> str:
+    """Compute a deterministic UUID5 for a demand row.
+
+    Based on the natural business key (customer part, PO number, delivery date,
+    customer name) so the *same logical row* gets the *same UUID* even when
+    the file is re-uploaded.  This enables change-tracking across versions:
+    v1 and v2 share the same row_id → you can see which field changed.
+
+    When all key fields are empty (e.g. a metadata-only row) the row index is
+    incorporated to prevent UUID collision.
+    """
+    key = "|".join([
+        str(row.get("Customer Part #", "") or "").strip().lower(),
+        str(row.get("PO Number", "") or "").strip().lower(),
+        str(row.get("Delivery Date", "") or "").strip(),
+        str(row.get("Customer Name", "") or "").strip().lower(),
+    ])
+    if not key.replace("|", "").strip():
+        key = f"__empty_row_{index}__"
+    return str(_uuid.uuid5(_uuid.NAMESPACE_URL, key))
 
 
 def _build_mapped_rows(
@@ -36,21 +64,24 @@ def _build_mapped_rows(
     - First non-empty write wins (prevents later columns clobbering earlier ones
       that map to the same target, e.g. PO VERSION overwriting PURCHASE ORDER).
     - customer_name from file_metadata is injected if not already in the row.
+    - A deterministic _row_id (UUID5) is stamped on every row for change-tracking.
     """
     mapped_data = []
-    for row in raw_rows:
+    for i, row in enumerate(raw_rows):
         mapped_row: dict = {}
         for src_col, value in row.items():
-            # Date-bucket columns (e.g. "2026-10-26 00:00:00") come from SAP/forecast
-            # Excel files where each date header = a weekly/monthly demand quantity.
-            # Always treat these as forecast schedule data, regardless of AI mapping.
-            if _DATE_COL_RE.match(str(src_col).strip()):
+            # Date-bucket columns come from forecast files where each date/period header
+            # represents a demand quantity for that week/month.
+            # Handles: ISO dates ("2026-10-26"), month-year ("Aug. 2025", "Sep 2025").
+            src_str = str(src_col).strip()
+            if _DATE_COL_RE.match(src_str) or _MONTH_COL_RE.match(src_str):
                 try:
                     qty = float(str(value).replace(",", "").strip())
                     if qty > 0:
                         if "forecast_schedule" not in mapped_row:
                             mapped_row["forecast_schedule"] = {}
-                        date_key = str(src_col).strip()[:10]   # YYYY-MM-DD
+                        # ISO dates → first 10 chars (YYYY-MM-DD); month-year kept as-is
+                        date_key = src_str[:10] if _DATE_COL_RE.match(src_str) else src_str
                         mapped_row["forecast_schedule"][date_key] = qty
                 except (ValueError, TypeError):
                     pass
@@ -68,6 +99,10 @@ def _build_mapped_rows(
         # Inject customer name from file-level metadata when not present in the row
         if not mapped_row.get("Customer Name") and file_metadata.get("customer_name"):
             mapped_row["Customer Name"] = file_metadata["customer_name"]
+
+        # Stamp deterministic row ID — must be after Customer Name injection
+        # so the ID incorporates the final customer name value
+        mapped_row["_row_id"] = _compute_row_id(mapped_row, i)
 
         mapped_data.append(mapped_row)
     return mapped_data
