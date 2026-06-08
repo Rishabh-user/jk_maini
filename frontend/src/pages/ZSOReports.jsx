@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Search, Download, FileSpreadsheet, Plus, X, Mail, Loader2, ClipboardList,
-  CalendarDays, Rows3, Filter, ChevronLeft, ChevronRight
+  CalendarDays, Rows3, Filter, ChevronLeft, ChevronRight, ChevronDown, ChevronUp
 } from 'lucide-react'
 import { fetchZSOReports, exportZSO, generateZSO, fetchEmails } from '../services/api'
 
@@ -68,6 +68,8 @@ const getReportTotal = (report) => {
   return getItems(report).reduce((sum, item) => sum + Number(item.total_inr || item.total_price || 0), 0)
 }
 
+const getForexRatesUsed = (report) => report?.report_data?.forex_rates_used || {}
+
 const getReportCustomers = (report) => {
   const customers = new Set()
   getItems(report).forEach((item) => {
@@ -106,6 +108,11 @@ const getReportFileMeta = (report, emailIndex) => {
   return source.subject || `Report #${report.id}`
 }
 
+const isForecastLabel = (po) => {
+  const v = String(po || '').trim()
+  return v.length > 0 && !/^[\d\-/]+$/.test(v)
+}
+
 const flattenReportRows = (report, emailIndex) => {
   const items = getItems(report)
   const reportLabel = getReportFileLabel(report, emailIndex)
@@ -133,6 +140,8 @@ const flattenReportRows = (report, emailIndex) => {
     shipDate: item.ship_date || item.delivery_date || '',
     salesMonth: item.sales_month || '',
     status: report.status || 'draft',
+    // forecast drill-down (only present on forecast rows)
+    forecastSchedule: item.forecast_schedule || null,
   }))
 }
 
@@ -157,6 +166,8 @@ export default function ZSOReports() {
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(null)
   const [page, setPage] = useState(1)
+
+  const [expandedRowKey, setExpandedRowKey] = useState(null)
 
   const [showGenerate, setShowGenerate] = useState(false)
   const [processedEmails, setProcessedEmails] = useState([])
@@ -312,14 +323,33 @@ export default function ZSOReports() {
 
   const handleExportCSV = () => {
     if (filteredRows.length === 0) return
+
+    // Expand forecast rows with a schedule into one row per date+qty
+    const expandRow = (r, overrides = {}) => displayColumns.map((c) => {
+      const val = overrides[c.key] !== undefined ? overrides[c.key] : r[c.key]
+      return typeof val === 'number' ? val : val || ''
+    })
+
     const headers = displayColumns.map((c) => c.label)
-    const rows = filteredRows.map((r) =>
-      displayColumns.map((c) => {
-        const val = r[c.key]
-        return typeof val === 'number' ? val : val || ''
-      })
-    )
-    const csv = [headers.join(','), ...rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))].join('\n')
+    let srCounter = 0
+    const rows = filteredRows.flatMap((r) => {
+      if (isForecastLabel(r.poForecast) && r.forecastSchedule && Object.keys(r.forecastSchedule).length > 0) {
+        return Object.entries(r.forecastSchedule)
+          .filter(([, qty]) => qty > 0)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([date, qty]) => {
+            srCounter += 1
+            return expandRow(r, { srNo: srCounter, shipDate: date, openQty: qty, salesMonth: '' })
+          })
+      }
+      srCounter += 1
+      return [expandRow(r, { srNo: srCounter })]
+    })
+
+    const csv = [
+      headers.join(','),
+      ...rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')),
+    ].join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -513,6 +543,19 @@ export default function ZSOReports() {
                   </p>
                 </div>
               </div>
+              {selectedReport && Object.keys(getForexRatesUsed(selectedReport)).length > 0 && (
+                <div className="mt-3 pt-3 border-t border-gray-100 flex flex-wrap gap-2 items-center">
+                  <span className="text-[11px] text-gray-400 uppercase tracking-wide">Forex rates used:</span>
+                  {Object.entries(getForexRatesUsed(selectedReport)).map(([cur, fx]) => (
+                    <span key={cur} className="inline-flex items-center gap-1 rounded-full bg-blue-50 border border-blue-100 text-blue-700 text-xs px-2.5 py-0.5">
+                      1 {cur} = {fx.rate} INR
+                      {fx.effective_date && (
+                        <span className="text-blue-400">· eff. {new Date(fx.effective_date).toLocaleDateString('en-IN')}</span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
@@ -557,26 +600,80 @@ export default function ZSOReports() {
                       </td>
                     </tr>
                   ) : (
-                    paginated.map((row, i) => (
-                      <tr key={`${row.reportId}-${row.srNo}-${i}`} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
-                        {displayColumns.map((col) => {
-                          const val = row[col.key]
-                          const isNum = col.align === 'right'
-                          const display = isNum && typeof val === 'number' ? val.toLocaleString('en-IN') : val || '-'
-                          return (
-                            <td
-                              key={col.key}
-                              className={`px-4 py-3.5 text-sm text-gray-600 whitespace-nowrap max-w-[240px] truncate ${
-                                isNum ? 'text-right' : ''
-                              }`}
-                              title={String(display)}
-                            >
-                              {col.key === 'totalInr' ? formatMoney(val) : display}
-                            </td>
-                          )
-                        })}
-                      </tr>
-                    ))
+                    paginated.flatMap((row, i) => {
+                      const rowKey = `${row.reportId}-${row.srNo}-${i}`
+                      const isExpanded = expandedRowKey === rowKey
+                      const hasForecastSchedule = isForecastLabel(row.poForecast) && row.forecastSchedule && Object.keys(row.forecastSchedule).length > 0
+
+                      const mainRow = (
+                        <tr
+                          key={rowKey}
+                          className={`border-b border-gray-50 transition-colors ${hasForecastSchedule ? 'cursor-pointer' : ''} ${isExpanded ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                          onClick={() => hasForecastSchedule && setExpandedRowKey(isExpanded ? null : rowKey)}
+                        >
+                          {displayColumns.map((col) => {
+                            const val = row[col.key]
+                            const isNum = col.align === 'right'
+
+                            if (col.key === 'poForecast' && hasForecastSchedule) {
+                              return (
+                                <td key={col.key} className="px-4 py-3.5 text-sm whitespace-nowrap">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-xs font-medium px-2 py-0.5">
+                                      {val || 'Forecast'}
+                                    </span>
+                                    <span className="text-gray-400">
+                                      {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                    </span>
+                                  </div>
+                                </td>
+                              )
+                            }
+
+                            const display = isNum && typeof val === 'number' ? val.toLocaleString('en-IN') : val || '-'
+                            return (
+                              <td
+                                key={col.key}
+                                className={`px-4 py-3.5 text-sm text-gray-600 whitespace-nowrap max-w-[240px] truncate ${isNum ? 'text-right' : ''}`}
+                                title={String(display)}
+                              >
+                                {col.key === 'totalInr' ? formatMoney(val) : display}
+                              </td>
+                            )
+                          })}
+                        </tr>
+                      )
+
+                      if (!isExpanded || !hasForecastSchedule) return [mainRow]
+
+                      const scheduleEntries = Object.entries(row.forecastSchedule)
+                      const expandedRow = (
+                        <tr key={`${rowKey}-schedule`} className="bg-blue-50 border-b border-blue-100">
+                          <td colSpan={displayColumns.length} className="px-6 py-3">
+                            <div className="flex items-center gap-2 mb-2">
+                              <CalendarDays size={14} className="text-blue-600" />
+                              <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">
+                                Forecast Schedule — {scheduleEntries.length} date buckets · Total qty: {scheduleEntries.reduce((s, [, q]) => s + q, 0).toLocaleString('en-IN')}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto pr-1">
+                              {scheduleEntries.map(([date, qty]) => (
+                                <div
+                                  key={date}
+                                  className="flex items-center gap-1.5 rounded-md border border-blue-100 bg-white px-2.5 py-1.5 text-xs shadow-sm"
+                                >
+                                  <span className="font-medium text-gray-700">{formatDate(date)}</span>
+                                  <span className="text-gray-400">·</span>
+                                  <span className="font-semibold text-blue-700">{qty.toLocaleString('en-IN')} pcs</span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )
+
+                      return [mainRow, expandedRow]
+                    })
                   )}
                 </tbody>
               </table>

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import {
   Upload, FileSpreadsheet, FileText, Image, File, Trash2, RefreshCw,
   CheckCircle2, XCircle, Clock, Loader2, Eye, ChevronDown, ChevronUp,
-  Sparkles, Search
+  Sparkles, Search, Mail
 } from 'lucide-react'
 import { uploadDocument, fetchUploads, processUpload, deleteUpload, fetchAttachmentRawData } from '../services/api'
 
@@ -11,6 +11,8 @@ const FILE_ICONS = {
   excel: FileSpreadsheet,
   csv: FileSpreadsheet,
   image: Image,
+  email_msg: Mail,
+  email_eml: Mail,
   unknown: File,
 }
 
@@ -197,15 +199,15 @@ export default function UploadDocument() {
                 Drop files here or click to upload
               </p>
               <p className="text-xs text-gray-500 mt-2">
-                Supports: <span className="font-medium">.pdf</span>, <span className="font-medium">.xlsx</span>, <span className="font-medium">.xls</span>, <span className="font-medium">.csv</span>, <span className="font-medium">.png</span>, <span className="font-medium">.jpg</span>, <span className="font-medium">.tiff</span>
+                Supports: <span className="font-medium">.pdf</span>, <span className="font-medium">.xlsx</span>, <span className="font-medium">.xls</span>, <span className="font-medium">.csv</span>, <span className="font-medium">.slk</span>, <span className="font-medium">.msg</span>, <span className="font-medium">.eml</span>, <span className="font-medium">.png</span>, <span className="font-medium">.jpg</span>, <span className="font-medium">.tiff</span>
               </p>
-              <p className="text-xs text-gray-400 mt-1">Files are auto-processed with AI column mapping</p>
+              <p className="text-xs text-gray-400 mt-1">Email files (.msg/.eml) are unpacked — attachments inside are auto-extracted and processed</p>
             </>
           )}
           <input
             ref={fileRef}
             type="file"
-            accept=".pdf,.xlsx,.xls,.csv,.png,.jpg,.jpeg,.tiff,.bmp"
+            accept=".pdf,.xlsx,.xls,.csv,.slk,.msg,.eml,.png,.jpg,.jpeg,.tiff,.bmp"
             multiple
             onChange={(e) => handleUpload(Array.from(e.target.files || []))}
             className="hidden"

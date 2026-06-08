@@ -1,4 +1,5 @@
 import os
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy import select, func
@@ -17,18 +18,74 @@ from app.utils.logging import logger
 settings = get_settings()
 router = APIRouter(prefix="/uploads", tags=["Document Upload"])
 
+# Matches column names that are ISO-date-like (e.g. "2026-10-26" or "2026-10-26 00:00:00")
+# These come from SAP/forecast Excel files where date headers represent weekly demand buckets.
+_DATE_COL_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}")
+
+
+def _build_mapped_rows(
+    raw_rows: list[dict],
+    column_mapping: dict,
+    file_metadata: dict,
+) -> list[dict]:
+    """Map raw extracted rows to system column names.
+
+    Rules:
+    - UNMAPPED columns are skipped, EXCEPT date-like column headers whose
+      numeric values are collected into forecast_schedule {date: qty}.
+    - First non-empty write wins (prevents later columns clobbering earlier ones
+      that map to the same target, e.g. PO VERSION overwriting PURCHASE ORDER).
+    - customer_name from file_metadata is injected if not already in the row.
+    """
+    mapped_data = []
+    for row in raw_rows:
+        mapped_row: dict = {}
+        for src_col, value in row.items():
+            # Date-bucket columns (e.g. "2026-10-26 00:00:00") come from SAP/forecast
+            # Excel files where each date header = a weekly/monthly demand quantity.
+            # Always treat these as forecast schedule data, regardless of AI mapping.
+            if _DATE_COL_RE.match(str(src_col).strip()):
+                try:
+                    qty = float(str(value).replace(",", "").strip())
+                    if qty > 0:
+                        if "forecast_schedule" not in mapped_row:
+                            mapped_row["forecast_schedule"] = {}
+                        date_key = str(src_col).strip()[:10]   # YYYY-MM-DD
+                        mapped_row["forecast_schedule"][date_key] = qty
+                except (ValueError, TypeError):
+                    pass
+                continue
+
+            target_col = column_mapping.get(src_col, src_col)
+            if target_col == "UNMAPPED":
+                continue
+
+            # First-write wins — don't overwrite an already-set non-empty value
+            if target_col in mapped_row and mapped_row[target_col] not in ("", None):
+                continue
+            mapped_row[target_col] = value
+
+        # Inject customer name from file-level metadata when not present in the row
+        if not mapped_row.get("Customer Name") and file_metadata.get("customer_name"):
+            mapped_row["Customer Name"] = file_metadata["customer_name"]
+
+        mapped_data.append(mapped_row)
+    return mapped_data
+
 ALLOWED_EXTENSIONS = {
-    "pdf", "xlsx", "xls", "csv",
+    "pdf", "xlsx", "xls", "csv", "slk",
     "png", "jpg", "jpeg", "tiff", "bmp",
+    "msg", "eml",
 }
 
 
 def _get_source_type(filename: str) -> str:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     type_map = {
-        "pdf": "pdf", "xlsx": "excel", "xls": "excel", "csv": "csv",
+        "pdf": "pdf", "xlsx": "excel", "xls": "excel", "csv": "csv", "slk": "excel",
         "png": "image", "jpg": "image", "jpeg": "image",
         "tiff": "image", "bmp": "image",
+        "msg": "email_msg", "eml": "email_eml",
     }
     return type_map.get(ext, "unknown")
 
@@ -99,20 +156,16 @@ async def upload_document(
         try:
             extracted = FileParser.parse(file_path, file.content_type)
             columns = extracted.get("columns", [])
+            file_metadata = extracted.get("file_metadata", {})
 
             column_mapping = {}
             mapped_data = extracted.get("rows", [])
 
             if columns:
                 column_mapping = await map_columns_with_ai(columns)
-                mapped_data = []
-                for row in extracted.get("rows", []):
-                    mapped_row = {}
-                    for src_col, value in row.items():
-                        target_col = column_mapping.get(src_col, src_col)
-                        if target_col != "UNMAPPED":
-                            mapped_row[target_col] = value
-                    mapped_data.append(mapped_row)
+                mapped_data = _build_mapped_rows(
+                    extracted.get("rows", []), column_mapping, file_metadata
+                )
 
             raw = RawData(
                 attachment_id=attachment.id,
@@ -177,20 +230,16 @@ async def process_upload(
         for attachment in attachments:
             extracted = FileParser.parse(attachment.file_path, attachment.content_type)
             columns = extracted.get("columns", [])
+            file_metadata = extracted.get("file_metadata", {})
 
             column_mapping = {}
             mapped_data = extracted.get("rows", [])
 
             if columns:
                 column_mapping = await map_columns_with_ai(columns)
-                mapped_data = []
-                for row in extracted.get("rows", []):
-                    mapped_row = {}
-                    for src_col, value in row.items():
-                        target_col = column_mapping.get(src_col, src_col)
-                        if target_col != "UNMAPPED":
-                            mapped_row[target_col] = value
-                    mapped_data.append(mapped_row)
+                mapped_data = _build_mapped_rows(
+                    extracted.get("rows", []), column_mapping, file_metadata
+                )
 
             raw = RawData(
                 attachment_id=attachment.id,

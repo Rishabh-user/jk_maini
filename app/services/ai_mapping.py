@@ -24,6 +24,78 @@ SYSTEM_SCHEMA_COLUMNS = [
     "Remarks",
 ]
 
+EXACT_COLUMN_MAP = {
+    "material": "Customer Part #",
+    "customer material": "Customer Part #",
+    "customer material no": "Customer Part #",
+    "customer material number": "Customer Part #",
+    "customer part": "Customer Part #",
+    "customer part #": "Customer Part #",
+    "customer part no": "Customer Part #",
+    "customer part number": "Customer Part #",
+    "f part": "Maini Part #",
+    "f part #": "Maini Part #",
+    "f part no": "Maini Part #",
+    "f part number": "Maini Part #",
+    "maini part": "Maini Part #",
+    "maini part #": "Maini Part #",
+    "maini part no": "Maini Part #",
+    "maini part number": "Maini Part #",
+    "desc": "Description",
+    "description": "Description",
+    "discription": "Description",
+    "material description": "Description",
+    "ostd qty": "Quantity",
+    "outstanding qty": "Quantity",
+    "open qty": "Quantity",
+    "initial qty": "Quantity",
+    "quantity": "Quantity",
+    "qty": "Quantity",
+    "net price": "Unit Price",
+    "unit price": "Unit Price",
+    "unit price per pc": "Unit Price",
+    "price": "Unit Price",
+    "curr": "Currency",
+    "currency": "Currency",
+    "purchase order": "PO Number",
+    "po number": "PO Number",
+    "po no": "PO Number",
+    "po": "PO Number",
+    "requested delivery date": "Delivery Date",
+    "delivery date": "Delivery Date",
+    "ship date": "Delivery Date",
+    "po date": "PO Date",
+    "doc date": "PO Date",
+    "supplier comments": "Remarks",
+    "comments": "Remarks",
+    "remarks": "Remarks",
+    "supplier commitment date": "UNMAPPED",
+    "statistic date": "UNMAPPED",
+    "supplier description": "UNMAPPED",
+    "base uom": "UNMAPPED",
+    # SAP / Safran Procurement Plan columns that must NOT be confused with mapped fields
+    "po version": "UNMAPPED",
+    "item": "UNMAPPED",
+    "item type": "UNMAPPED",
+    "item no": "UNMAPPED",
+    "item number": "UNMAPPED",
+    "line item": "UNMAPPED",
+    "supplier code": "UNMAPPED",
+    "contract": "UNMAPPED",
+    "contract version": "UNMAPPED",
+    "ac desc": "UNMAPPED",
+    "trace ability": "UNMAPPED",
+    "traceability": "UNMAPPED",
+    "part configuration revision": "UNMAPPED",
+    "stock": "UNMAPPED",
+    "past due": "UNMAPPED",
+    "planned delivery time": "UNMAPPED",
+    "purchase order version": "UNMAPPED",
+    "order version": "UNMAPPED",
+    "doc version": "UNMAPPED",
+    "version": "UNMAPPED",
+}
+
 MAPPING_PROMPT_TEMPLATE = """You are a data mapping expert for a manufacturing parts management system.
 
 Given the following source column names extracted from a customer email/attachment:
@@ -78,6 +150,7 @@ async def map_columns_with_ai(source_columns: list[str]) -> dict[str, str]:
             response_text = response_text[json_start:json_end]
 
         mapping = json.loads(response_text)
+        mapping.update(_deterministic_mapping(source_columns))
         logger.info(f"AI column mapping completed: {len(mapping)} columns mapped")
         return mapping
 
@@ -89,6 +162,7 @@ async def map_columns_with_ai(source_columns: list[str]) -> dict[str, str]:
 def _fallback_mapping(source_columns: list[str]) -> dict[str, str]:
     """Basic keyword-based fallback mapping when AI is unavailable."""
     keyword_map = {
+        "material": "Customer Part #",
         "part": "Customer Part #",
         "cus": "Customer Part #",
         "customer": "Customer Part #",
@@ -115,12 +189,26 @@ def _fallback_mapping(source_columns: list[str]) -> dict[str, str]:
 
     mapping = {}
     for col in source_columns:
-        col_lower = col.lower().strip()
-        matched = "UNMAPPED"
-        for keyword, schema_col in keyword_map.items():
-            if keyword in col_lower:
-                matched = schema_col
-                break
+        col_lower = _normalize_column_name(col)
+        matched = EXACT_COLUMN_MAP.get(col_lower, "UNMAPPED")
+        if matched == "UNMAPPED" and col_lower not in EXACT_COLUMN_MAP:
+            for keyword, schema_col in keyword_map.items():
+                if keyword in col_lower:
+                    matched = schema_col
+                    break
         mapping[col] = matched
 
     return mapping
+
+
+def _deterministic_mapping(source_columns: list[str]) -> dict[str, str]:
+    mapping = {}
+    for col in source_columns:
+        normalized = _normalize_column_name(col)
+        if normalized in EXACT_COLUMN_MAP:
+            mapping[col] = EXACT_COLUMN_MAP[normalized]
+    return mapping
+
+
+def _normalize_column_name(column: str) -> str:
+    return " ".join(str(column or "").replace("_", " ").replace("-", " ").lower().split())

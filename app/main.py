@@ -10,10 +10,10 @@ from app.db.session import engine, Base
 from app.models import (  # noqa: F401 — register models
     User, Email, Attachment, RawData, MainiPart, ZSOReport,
     DemandUpload, InventoryStock, AllocationResult,
-    CoverageReport, SalesData, BudgetData,
+    CoverageReport, SalesData, BudgetData, ForexRate,
 )
 from app.api import auth, users, emails, attachments, zso, dashboard, master_data
-from app.api import demand, inventory, coverage, performance, uploads
+from app.api import demand, inventory, coverage, performance, uploads, forex
 from app.utils.config import get_settings
 from app.utils.logging import logger
 
@@ -62,6 +62,7 @@ app.include_router(inventory.router)
 app.include_router(coverage.router)
 app.include_router(performance.router)
 app.include_router(uploads.router)
+app.include_router(forex.router)
 
 
 # ──────────────────────────────────────────────

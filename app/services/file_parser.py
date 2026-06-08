@@ -1,7 +1,9 @@
+import email as _email_lib
 import io
 import math
 import os
 import re
+import tempfile
 from collections import defaultdict
 
 import pandas as pd
@@ -45,6 +47,8 @@ _FOOTER_ROW_MARKERS = (
     "net total",
     "your material",
     "contract n",
+    "contract erp",
+    "contractual data",
     "page ",
     "www.",
     "sasu au capital",
@@ -56,6 +60,7 @@ _FOOTER_ROW_MARKERS = (
     "prepaid a",
     "total: us",
     "total: usd",
+    "line gross amount",
 )
 _DISPLAY_TABLE_TYPES = frozenset({"line_items", "schedule", "other"}) 
 
@@ -78,9 +83,464 @@ class FileParser:
             return FileParser.parse_text(file_path)
         if ext in (".png", ".jpg", ".jpeg", ".tiff", ".bmp"):
             return FileParser.parse_image(file_path)
+        if ext == ".slk":
+            return FileParser.parse_slk(file_path)
+        if ext == ".msg":
+            return FileParser.parse_msg(file_path)
+        if ext == ".eml":
+            return FileParser.parse_eml(file_path)
 
         logger.warning(f"Unsupported file type: {ext}")
         return {"error": f"Unsupported file type: {ext}", "columns": [], "rows": []}
+
+    # ------------------------------------------------------------------ #
+    #  SYLK / SLK spreadsheet format                                      #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _parse_sylk_grid(file_path: str) -> dict[tuple[int, int], object]:
+        """Parse a SYLK file into a sparse {(row, col): value} grid.
+
+        SYLK is a text-based format:
+          C;Y<row>;X<col>;K<value>   → cell at (row, col) = value
+          F;Y<row>;X<col>            → update current row/col cursor
+        String values are quoted: K"text"
+        Numeric values are bare: K42.0
+        Excel date serials (40000–60000) are converted to ISO date strings.
+        """
+        import datetime as _dt
+
+        grid: dict[tuple[int, int], object] = {}
+        cur_row, cur_col = 1, 1
+
+        try:
+            with open(file_path, "r", errors="replace") as f:
+                lines = f.readlines()
+        except Exception as e:
+            logger.error(f"Cannot read SYLK file '{file_path}': {e}")
+            return {}
+
+        for line in lines:
+            line = line.strip()
+
+            # F records update the cursor position
+            if line.startswith("F;"):
+                for part in line.split(";")[1:]:
+                    if part.startswith("Y"):
+                        try: cur_row = int(part[1:])
+                        except ValueError: pass
+                    elif part.startswith("X"):
+                        try: cur_col = int(part[1:])
+                        except ValueError: pass
+                continue
+
+            if not line.startswith("C;"):
+                continue
+
+            row, col, value = cur_row, cur_col, None
+            for part in line.split(";")[1:]:
+                if part.startswith("Y"):
+                    try: row = int(part[1:])
+                    except ValueError: pass
+                elif part.startswith("X"):
+                    try: col = int(part[1:])
+                    except ValueError: pass
+                elif part.startswith("K"):
+                    raw = part[1:]
+                    if raw.startswith('"') and raw.endswith('"'):
+                        value = raw[1:-1]
+                    else:
+                        try:
+                            num = float(raw)
+                            # Convert Excel date serials → ISO date string
+                            if 40_000 < num < 60_000:
+                                base = _dt.date(1899, 12, 30)
+                                value = (base + _dt.timedelta(days=int(num))).strftime("%Y-%m-%d")
+                            else:
+                                value = num
+                        except ValueError:
+                            value = raw
+
+            grid[(row, col)] = value
+            cur_row, cur_col = row, col
+
+        return grid
+
+    @staticmethod
+    def parse_slk(file_path: str) -> dict:
+        """Parse a SYLK (.slk) file into the standard extracted-data format.
+
+        Generic algorithm — no customer-specific strings hardcoded:
+        1. Build the sparse cell grid via _parse_sylk_grid.
+        2. Scan for labelled metadata cells ("Reference:", "Purchase order",
+           "Ship to") to extract document-level fields.
+        3. Find the schedule section by locating a header row that contains
+           columns matching status / ship-date / quantity semantics.
+        4. Emit one row per non-zero schedule entry, already using system
+           field names so no AI column mapping step is needed.
+        """
+        grid = FileParser._parse_sylk_grid(file_path)
+        if not grid:
+            return {"columns": [], "rows": [], "error": "Empty or unreadable SYLK file"}
+
+        max_row = max(r for r, _ in grid)
+        max_col = max(c for _, c in grid)
+
+        # ── Step 2: extract document-level metadata ─────────────────────
+        _ref_re = re.compile(r"^reference[:\s]*$", re.I)
+        _po_re = re.compile(r"^purchase\s*order$", re.I)
+        _shipto_re = re.compile(r"^ship\s+to$", re.I)
+
+        customer_part = ""
+        po_number = ""
+        customer_name = ""
+
+        for (r, c), val in grid.items():
+            if not isinstance(val, str):
+                continue
+            text = val.strip()
+            if _ref_re.match(text):
+                customer_part = str(grid.get((r, c + 1), "")).strip()
+            elif _po_re.match(text):
+                # PO number is on the row below the "Purchase order" header
+                po_number = str(grid.get((r + 1, c), "")).strip()
+                # "Ship to" is usually 2 cols to the right on the same data row
+                ship_to_val = grid.get((r + 1, c + 2), "")
+                if ship_to_val:
+                    customer_name = str(ship_to_val).strip()
+            elif _shipto_re.match(text):
+                ship_to_val = grid.get((r + 1, c), "")
+                if ship_to_val and not customer_name:
+                    customer_name = str(ship_to_val).strip()
+
+        # ── Step 3: find the schedule header row ────────────────────────
+        # Look for a row whose cells collectively mention status, date, and qty
+        _status_re = re.compile(r"\bstatus\b", re.I)
+        _date_re = re.compile(r"\bship.*date\b|\bdate\b", re.I)
+        _qty_re = re.compile(r"\bscheduled\b|\bqty\b|\bquantity\b", re.I)
+
+        schedule_header_row: int | None = None
+        status_col = ship_date_col = qty_col = None
+
+        for r in range(1, max_row + 1):
+            row_cells = {c: str(grid.get((r, c), "")).strip() for c in range(1, max_col + 1)}
+            texts = {c: v for c, v in row_cells.items() if v}
+            if (
+                any(_status_re.search(v) for v in texts.values())
+                and any(_date_re.search(v) for v in texts.values())
+                and any(_qty_re.search(v) for v in texts.values())
+            ):
+                schedule_header_row = r
+                for col_idx, text in texts.items():
+                    if _status_re.search(text): status_col = col_idx
+                    elif _date_re.search(text): ship_date_col = col_idx
+                    elif _qty_re.search(text): qty_col = col_idx
+                break
+
+        # ── Step 4: extract schedule rows ───────────────────────────────
+        rows: list[dict] = []
+        if schedule_header_row and status_col and ship_date_col and qty_col:
+            for r in range(schedule_header_row + 1, max_row + 1):
+                status = str(grid.get((r, status_col), "")).strip()
+                ship_date = str(grid.get((r, ship_date_col), "")).strip()
+                qty_raw = grid.get((r, qty_col), "")
+
+                if not status or not ship_date:
+                    continue
+                try:
+                    qty = float(str(qty_raw).strip())
+                except (ValueError, TypeError):
+                    continue
+                if qty <= 0:
+                    continue
+
+                rows.append({
+                    "Customer Part #": customer_part,
+                    "PO Number": po_number,
+                    "Quantity": qty,
+                    "Delivery Date": ship_date,
+                    "Customer Name": customer_name,
+                    "Remarks": status,   # LATE / FIRM / OPEN / PREV
+                })
+
+        columns = list(rows[0].keys()) if rows else []
+        file_metadata = {"customer_name": customer_name} if customer_name else {}
+
+        logger.info(
+            f"SYLK parsed: {len(rows)} schedule rows | "
+            f"part={customer_part} | PO={po_number} | customer={customer_name}"
+        )
+        result: dict = {"columns": columns, "rows": rows}
+        if file_metadata:
+            result["file_metadata"] = file_metadata
+        return result
+
+    # ------------------------------------------------------------------ #
+    #  Email container formats (.msg / .eml)                              #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _extract_email_sender_name(sender: str) -> str | None:
+        """Generically extract a customer/company name from an email sender string.
+
+        Handles forms like:
+          "TAHAR Margaux (SAFRAN LANDING SYSTEMS) <margaux@safrangroup.com>"
+          "sabrina.faivre@figeac-aero.com"
+          "SEKO Aerospace <orders@seko.com>"
+
+        Returns None for internal Maini emails so those don't pollute customer name.
+        """
+        if not sender:
+            return None
+        # Skip internal Maini emails — let attachment-level metadata take over
+        if "mainimail.com" in sender.lower():
+            return None
+
+        # Extract display name from "Name <email>" format
+        name_match = re.match(r'^"?([^"<]+?)"?\s*<', sender.strip())
+        display_name = name_match.group(1).strip() if name_match else sender.split("<")[0].strip()
+
+        if not display_name:
+            return None
+
+        # Prefer company name in parentheses: "Firstname Surname (COMPANY NAME)"
+        paren_match = re.search(r'\(([^)]{3,})\)', display_name)
+        if paren_match:
+            return paren_match.group(1).strip()
+
+        # If display name looks like a person's name (2-3 words, not all-caps) and
+        # the email domain suggests a company, use the domain-based name instead
+        parts = display_name.split()
+        if len(parts) <= 3 and not display_name.isupper():
+            # Try to derive company from email domain
+            email_match = re.search(r'<([^>]+)>', sender)
+            if email_match:
+                domain = email_match.group(1).split("@")[-1].split(".")[0]
+                if len(domain) > 3 and domain.lower() not in ("gmail", "yahoo", "hotmail", "outlook"):
+                    return domain.replace("-", " ").title()
+
+        return display_name if len(display_name) > 2 else None
+
+    @staticmethod
+    def _parse_email_attachments(attachments: list[tuple[str, bytes]]) -> dict:
+        """Parse a list of (filename, bytes) attachment tuples.
+
+        Writes each to a temp file, runs through the existing FileParser, and
+        returns the result with the most extracted rows.  Image-only emails
+        return an empty result.
+        """
+        # Extensions we can actually parse — skip images & other noise
+        _PARSEABLE = {"xlsx", "xls", "pdf", "csv", "txt"}
+
+        results: list[dict] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for filename, data in attachments:
+                if not filename or not data:
+                    continue
+                ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+                if ext not in _PARSEABLE:
+                    logger.debug(f"Skipping attachment '{filename}' (unsupported type .{ext})")
+                    continue
+
+                att_path = os.path.join(tmpdir, filename)
+                try:
+                    with open(att_path, "wb") as f:
+                        f.write(data)
+                    result = FileParser.parse(att_path)
+                    if result.get("rows"):
+                        result["_source_attachment"] = filename
+                        results.append(result)
+                        logger.info(f"Email attachment '{filename}' → {len(result['rows'])} rows")
+                    else:
+                        logger.debug(f"Email attachment '{filename}' yielded no rows")
+                except Exception as e:
+                    logger.warning(f"Failed to parse email attachment '{filename}': {e}")
+
+        if not results:
+            return {"columns": [], "rows": [], "tables": []}
+
+        # Use the attachment with the most rows; merge file_metadata from others if missing
+        best = max(results, key=lambda r: len(r.get("rows", [])))
+        for r in results:
+            if r is best:
+                continue
+            if r.get("file_metadata") and not best.get("file_metadata"):
+                best["file_metadata"] = r["file_metadata"]
+        return best
+
+    @staticmethod
+    def parse_msg(file_path: str) -> dict:
+        """Parse an Outlook .msg email file.
+
+        Extracts attachments (XLSX/PDF/CSV) and parses them with the existing
+        FileParser.  Customer name is inferred from the sender when the email
+        originated outside Maini.
+        """
+        try:
+            import extract_msg  # type: ignore
+        except ImportError:
+            logger.error("extract_msg not installed — cannot parse .msg files")
+            return {"error": "extract_msg library not installed", "columns": [], "rows": []}
+
+        try:
+            msg = extract_msg.openMsg(file_path)
+        except Exception as e:
+            logger.error(f"Failed to open .msg file '{file_path}': {e}")
+            return {"error": str(e), "columns": [], "rows": []}
+
+        sender = str(msg.sender or "")
+        subject = str(msg.subject or "")
+        body = str(msg.body or "")
+        logger.info(f"MSG: subject='{subject}' sender='{sender}' attachments={len(msg.attachments)}")
+
+        # Build (filename, bytes) list for all attachments
+        attachment_data: list[tuple[str, bytes]] = []
+        for att in msg.attachments:
+            fname = att.longFilename or att.shortFilename or ""
+            try:
+                data = att.data
+                if data:
+                    attachment_data.append((fname, data))
+            except Exception as e:
+                logger.warning(f"Could not read MSG attachment '{fname}': {e}")
+
+        result = FileParser._parse_email_attachments(attachment_data)
+
+        # Inject customer name from sender if not already set by attachment parsers
+        sender_name = FileParser._extract_email_sender_name(sender)
+        if sender_name:
+            result.setdefault("file_metadata", {})
+            if not result["file_metadata"].get("customer_name"):
+                result["file_metadata"]["customer_name"] = sender_name
+                logger.info(f"MSG customer name from sender: '{sender_name}'")
+
+        # Fallback: if no attachments had rows, surface the email body as raw text
+        if not result.get("rows") and body.strip():
+            result["raw_text"] = body.strip()
+            result["_source"] = "email_body"
+
+        result["_email_subject"] = subject
+        result["_email_sender"] = sender
+        return result
+
+    @staticmethod
+    def parse_eml(file_path: str) -> dict:
+        """Parse a standard .eml email file.
+
+        Extracts attachments (XLSX/PDF/CSV) and parses them with the existing
+        FileParser.  Customer name is inferred from the From header.
+        """
+        try:
+            with open(file_path, "rb") as f:
+                raw = f.read()
+            msg = _email_lib.message_from_bytes(raw)
+        except Exception as e:
+            logger.error(f"Failed to open .eml file '{file_path}': {e}")
+            return {"error": str(e), "columns": [], "rows": []}
+
+        sender = msg.get("from", "")
+        subject = msg.get("subject", "")
+        logger.info(f"EML: subject='{subject}' sender='{sender}'")
+
+        # Collect attachments
+        attachment_data: list[tuple[str, bytes]] = []
+        body_text = ""
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            filename = part.get_filename()
+
+            if filename:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    attachment_data.append((filename, payload))
+            elif content_type == "text/plain" and not filename:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    body_text += payload.decode(errors="replace")
+
+        result = FileParser._parse_email_attachments(attachment_data)
+
+        # Inject customer name from sender if not already set
+        sender_name = FileParser._extract_email_sender_name(sender)
+        if sender_name:
+            result.setdefault("file_metadata", {})
+            if not result["file_metadata"].get("customer_name"):
+                result["file_metadata"]["customer_name"] = sender_name
+                logger.info(f"EML customer name from sender: '{sender_name}'")
+
+        # Fallback: surface email body if no usable attachments
+        if not result.get("rows") and body_text.strip():
+            result["raw_text"] = body_text.strip()
+            result["_source"] = "email_body"
+
+        result["_email_subject"] = subject
+        result["_email_sender"] = sender
+        return result
+
+    @staticmethod
+    def _extract_pdf_metadata(text: str) -> dict:
+        """Generically extract customer/buyer name and other metadata from PDF text.
+
+        Tries in priority order — no customer-specific strings hardcoded:
+        1. Explicit buyer labels: 'Buyer:', 'Customer:', 'Bill to:', 'Sold to:'
+        2. Two-column 'Delivery : Supplier :' header → takes the left/delivery side
+        3. Company name appearing before 'Page X/Y' in the document header
+        """
+        metadata: dict = {}
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+        _doc_type_re = re.compile(
+            r"\b(purchase|order|invoice|report|schedule|plan|statement|note)\b", re.I
+        )
+
+        # Priority 1 — explicit buyer/customer label on same or next line
+        explicit_re = re.compile(
+            r"^(?:buyer|customer|bill\s+to|sold\s+to|client|deliver\s+to)\s*[:\-]\s*(.+)$",
+            re.I,
+        )
+        for i, line in enumerate(lines[:40]):
+            m = explicit_re.match(line)
+            if m:
+                candidate = m.group(1).strip()
+                if 3 < len(candidate) < 120 and not _doc_type_re.search(candidate):
+                    metadata["customer_name"] = candidate
+                    return metadata
+            # Label alone on its own line, company name on the next line
+            if explicit_re.match(line + " x"):  # check if line IS a label with no value
+                pass
+            if re.match(r"^(?:buyer|customer|bill\s+to|sold\s+to|client)\s*[:\-]?\s*$", line, re.I):
+                if i + 1 < len(lines):
+                    candidate = lines[i + 1].strip()
+                    if 3 < len(candidate) < 120 and not _doc_type_re.search(candidate):
+                        metadata["customer_name"] = candidate
+                        return metadata
+
+        # Priority 2 — 'Delivery : Supplier :' (or 'Delivery : / Supplier :') two-column header
+        for i, line in enumerate(lines[:30]):
+            if re.search(r"delivery\s*:\s*supplier\s*:", line, re.I):
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1]
+                    # Split on 2+ spaces (positional columns in extracted text)
+                    parts = re.split(r"\s{2,}", next_line)
+                    if len(parts) >= 2:
+                        candidate = parts[0].strip()
+                        if 3 < len(candidate) < 120 and re.search(r"[A-Za-z]", candidate):
+                            metadata["customer_name"] = candidate
+                            return metadata
+                break
+
+        # Priority 3 — company name appearing just before 'Page X/Y' in page header
+        page_hdr_re = re.compile(r"(.+?)\s+Page\s+\d+\s*/\s*\d+", re.I)
+        for line in lines[:15]:
+            m = page_hdr_re.search(line)
+            if m:
+                candidate = m.group(1).strip()
+                if 4 < len(candidate) < 100 and not _doc_type_re.search(candidate):
+                    metadata["customer_name"] = candidate
+                    logger.info(f"Extracted PDF customer name from page header: '{candidate}'")
+                    return metadata
+
+        return metadata
 
     @staticmethod
     def parse_pdf(file_path: str) -> dict:
@@ -126,13 +586,15 @@ class FileParser:
             )
 
         scored_tables: list[dict] = []
-        for cand in raw_candidates:
+        for index, cand in enumerate(raw_candidates):
             if not cand:
                 continue
             prepared = FileParser._prepare_table_candidate(cand)
             if prepared and prepared["score"] >= _TABLE_MIN_SCORE:
+                prepared["source_index"] = index
                 scored_tables.append(prepared)
 
+        scored_tables = FileParser._merge_compatible_table_candidates(scored_tables)
         scored_tables = FileParser._dedupe_table_candidates(scored_tables)
         scored_tables.sort(key=lambda t: t["score"], reverse=True)
 
@@ -169,12 +631,14 @@ class FileParser:
                 "_debug": {"selected_strategy": "none", "table_candidates": []},
             }
 
+        file_metadata = FileParser._extract_pdf_metadata(full_text)
+
         logger.info(
             f"PDF parsed final: primary={primary['table_id']} type={primary['table_type']} "
             f"strategy={primary['strategy']} score={primary['score']:.2f} "
             f"columns={len(primary['columns'])} rows={len(primary['rows'])} tables={len(selected_tables)}"
         )
-        return {
+        result: dict = {
             "columns": primary["columns"],
             "rows": primary["rows"],
             "tables": selected_tables,
@@ -200,6 +664,9 @@ class FileParser:
                 ],
             },
         }
+        if file_metadata:
+            result["file_metadata"] = file_metadata
+        return result
 
     @staticmethod
     def _make_candidate(
@@ -592,6 +1059,80 @@ class FileParser:
         return score
 
     @staticmethod
+    def _merge_compatible_table_candidates(tables: list[dict]) -> list[dict]:
+        if not tables:
+            return []
+
+        grouped: dict[tuple, list[dict]] = defaultdict(list)
+        for table in tables:
+            grouped[FileParser._table_merge_key(table)].append(table)
+
+        merged: list[dict] = []
+        for group in grouped.values():
+            if len(group) == 1:
+                merged.append(group[0])
+                continue
+
+            ordered = sorted(group, key=lambda t: (t.get("source_index", 0), t["page_no"], t["table_id"]))
+            first = ordered[0]
+            columns = first["columns"]
+            canonical = set(first.get("canonical_fields", []))
+            rows: list[dict] = []
+            seen: set[tuple[str, ...]] = set()
+
+            for table in ordered:
+                canonical.update(table.get("canonical_fields", []))
+                for row in table["rows"]:
+                    signature = FileParser._table_row_signature(row, columns)
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    rows.append(row)
+
+            if not rows:
+                continue
+
+            strategies = {t["strategy"] for t in ordered}
+            strategy = ordered[0]["strategy"] if len(strategies) == 1 else "pdf_tables_merged"
+            score = FileParser._score_table_candidate(
+                columns,
+                rows,
+                canonical,
+                first["table_type"],
+                strategy,
+            )
+            score = max(score, max(t["score"] for t in ordered) + min(len(rows), 50) / 20.0)
+            merged.append(
+                {
+                    "table_id": f"{first['table_id']}_merged",
+                    "page_no": first["page_no"],
+                    "strategy": f"{strategy}_merged",
+                    "table_type": first["table_type"],
+                    "columns": columns,
+                    "rows": rows,
+                    "canonical_fields": sorted(canonical),
+                    "score": score,
+                    "source_index": first.get("source_index", 0),
+                }
+            )
+
+        return merged
+
+    @staticmethod
+    def _table_merge_key(table: dict) -> tuple:
+        return (
+            table["table_type"],
+            tuple(FileParser._normalize_header(c) for c in table["columns"]),
+        )
+
+    @staticmethod
+    def _table_row_signature(row: dict, columns: list[str]) -> tuple[str, ...]:
+        return tuple(
+            re.sub(r"\s+", " ", str(row.get(col, "")).strip().lower())
+            for col in columns
+        )
+
+    @staticmethod
     def _dedupe_table_candidates(tables: list[dict]) -> list[dict]:
         if not tables:
             return []
@@ -602,6 +1143,7 @@ class FileParser:
                 tuple(sorted(FileParser._normalize_header(c) for c in table["columns"][:6])),
                 table["table_type"],
             )
+            rows_sig = tuple(FileParser._table_row_signature(row, table["columns"]) for row in table["rows"])
             duplicate = False
             for existing in kept:
                 existing_sig = (
@@ -609,7 +1151,10 @@ class FileParser:
                     tuple(sorted(FileParser._normalize_header(c) for c in existing["columns"][:6])),
                     existing["table_type"],
                 )
-                if sig == existing_sig:
+                existing_rows_sig = tuple(
+                    FileParser._table_row_signature(row, existing["columns"]) for row in existing["rows"]
+                )
+                if sig == existing_sig and rows_sig == existing_rows_sig:
                     duplicate = True
                     break
             if not duplicate:
@@ -667,8 +1212,19 @@ class FileParser:
 
         type_priority = {"line_items": 0, "schedule": 1, "other": 2, "footer": 3}
 
+        # Strategies that produce semantically clean, multi-row extractions get a
+        # bonus proportional to their row count so they beat layout/table candidates
+        # that split multi-word headers into meaningless single-word columns.
+        _TRUSTED_STRATEGIES = {
+            "pdf_text_headered_line_items",
+            "pdf_text_airsupply_po",
+            "pdf_text_po_pattern",
+        }
+
         def rank_key(t: dict) -> tuple:
             effective = t["score"] + FileParser._header_quality_score(t["columns"])
+            if t["strategy"] in _TRUSTED_STRATEGIES:
+                effective += 8.0 + len(t["rows"]) * 1.5
             return (type_priority.get(t["table_type"], 9), -effective)
 
         return sorted(tables, key=rank_key)[0]
@@ -889,6 +1445,28 @@ class FileParser:
         if not lines:
             return []
 
+        # Generically extract PO number from document header text.
+        # Matches: "Purchase order n° :5000004014", "Purchase Order: 4500123456",
+        #          "PO Number: 7010244328", "PO No. 4500123456"
+        po_header_re = re.compile(
+            r"(?:purchase\s+order(?:\s+n[°o]?)?|p\.?o\.?\s*(?:number|no\.?)?)\s*[:#°]?\s*(\d{6,12})",
+            re.I,
+        )
+        doc_po_number = ""
+        po_match = po_header_re.search(text)
+        if po_match:
+            doc_po_number = po_match.group(1).strip()
+
+        # Extract PO date from header area (first 500 chars)
+        po_date_re = re.compile(
+            r"(?:purchase\s+order|p\.?o\.?)\D{0,30}?(\d{1,2}/\d{1,2}/\d{4})",
+            re.I,
+        )
+        doc_po_date = ""
+        date_match = po_date_re.search(text[:500])
+        if date_match:
+            doc_po_date = date_match.group(1).strip()
+
         header_re = re.compile(
             r"\bitem\b.*\bmaterial\b.*\bquantity\b.*\bunit\b.*\bnet\s+price\b.*"
             r"\bdelivery\s+date\b.*\btotal\s+w/o\s+tax\b",
@@ -936,8 +1514,9 @@ class FileParser:
                 if current:
                     rows.append(current)
                     current = None
-                if rows:
-                    break
+                # Exit table mode but do NOT break — multi-page POs repeat the
+                # header on every page, so we must re-enter when we see it again.
+                in_table = False
                 continue
 
             match = row_re.match(line)
@@ -957,6 +1536,9 @@ class FileParser:
                     "Total w/o tax": f"{total} {currency}".strip(),
                     "Description": "",
                     "Your material reference": "",
+                    # Stamped from document header — same PO covers all line items
+                    "PO Number": doc_po_number,
+                    "PO Date": doc_po_date,
                 }
                 continue
 
@@ -1279,12 +1861,13 @@ class FileParser:
         engine = "xlrd" if ext == ".xls" else "openpyxl"
         all_rows = []
         columns = []
+        file_metadata: dict = {}
 
         try:
             xls = pd.ExcelFile(file_path, engine=engine)
             for sheet_name in xls.sheet_names:
                 df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-                df = FileParser._normalize_excel_table(df_raw)
+                df, header_idx = FileParser._normalize_excel_table(df_raw)
                 if df.empty:
                     continue
                 df.columns = FileParser._unique_headers([str(c).strip() for c in df.columns])
@@ -1292,6 +1875,9 @@ class FileParser:
                     columns = df.columns.tolist()
                 all_rows.extend(df.fillna("").to_dict(orient="records"))
                 logger.info(f"Excel sheet '{sheet_name}': {len(df.columns)} columns, {len(df)} rows")
+                # Extract metadata from pre-header rows (e.g. customer/org name) — first sheet only
+                if not file_metadata and header_idx > 0:
+                    file_metadata = FileParser._extract_pre_header_metadata(df_raw, header_idx)
         except Exception:
             logger.warning(f"Binary Excel parse failed, trying as tab/comma/HTML: {file_path}")
             try:
@@ -1315,16 +1901,25 @@ class FileParser:
 
         all_rows = FileParser._sanitize_rows(all_rows)
         logger.info(f"Excel parsed total: {len(columns)} columns, {len(all_rows)} rows")
-        return {"columns": columns, "rows": all_rows}
+        result: dict = {"columns": columns, "rows": all_rows}
+        if file_metadata:
+            result["file_metadata"] = file_metadata
+        return result
 
     @staticmethod
-    def _normalize_excel_table(df_raw: pd.DataFrame) -> pd.DataFrame:
+    def _normalize_excel_table(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+        """Detect header row, return (body_dataframe, header_row_index).
+
+        The header_row_index is the positional index in df_raw (after dropna) of the
+        detected header row — callers use it to extract pre-header metadata rows.
+        Returns (-1, empty_df) when no usable table is found.
+        """
         if df_raw is None or df_raw.empty:
-            return pd.DataFrame()
+            return pd.DataFrame(), -1
 
         df = df_raw.dropna(how="all").copy()
         if df.empty:
-            return pd.DataFrame()
+            return pd.DataFrame(), -1
 
         best_idx = None
         best_score = -1.0
@@ -1360,12 +1955,13 @@ class FileParser:
             # Fallback: first row as header.
             header = [FileParser._clean_cell(v) or f"Column_{idx+1}" for idx, v in enumerate(df.iloc[0].tolist())]
             body = df.iloc[1:].copy()
+            best_idx = 0
         else:
             header = [FileParser._clean_cell(v) or f"Column_{idx+1}" for idx, v in enumerate(df.iloc[best_idx].tolist())]
             body = df.iloc[best_idx + 1 :].copy()
 
         if body.empty:
-            return pd.DataFrame()
+            return pd.DataFrame(), best_idx
 
         body.columns = header
         body = body.dropna(how="all")
@@ -1377,13 +1973,128 @@ class FileParser:
             keep_mask.append(len(non_empty) >= 2)
         if keep_mask:
             body = body.loc[keep_mask]
-        return body.reset_index(drop=True)
+        return body.reset_index(drop=True), best_idx
+
+    @staticmethod
+    def _extract_pre_header_metadata(df_raw: pd.DataFrame, header_row_idx: int) -> dict:
+        """Generically extract useful metadata (e.g. customer/org name) from rows
+        that appear above the detected header row.
+
+        Strategy — no hardcoding:
+        - Collect every row above the header that has exactly one meaningful cell.
+        - Classify each value: skip doc-title keywords, skip dates, skip addresses
+          (postal-code pattern or multiple comma-separated parts), skip legal prose.
+        - The first remaining short text is the most likely org/customer name.
+        """
+        if header_row_idx <= 0:
+            return {}
+
+        df = df_raw.dropna(how="all").copy()
+        pre_header = df.iloc[:header_row_idx]
+
+        # Patterns used for classification — no customer-specific strings
+        _doc_title_re = re.compile(
+            r"\b(report|schedule|order|plan|invoice|forecast|delivery|procurement|"
+            r"confirmation|acknowledgement|acknowledgment|purchase|vendor|supplier)\b",
+            re.I,
+        )
+        _postal_code_re = re.compile(
+            r"\b([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}|\d{5,6})\b"  # UK/numeric postal
+        )
+        _date_re = re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b")
+        _legal_prose_re = re.compile(r"\b(shall|hereby|pursuant|acknowledge|acceptance|deemed)\b", re.I)
+
+        candidate_name: str | None = None
+
+        for i in range(len(pre_header)):
+            row_vals = [
+                FileParser._clean_cell(v)
+                for v in pre_header.iloc[i].tolist()
+                if FileParser._clean_cell(v)
+                and FileParser._clean_cell(v).lower() not in ("nan", "none", "")
+            ]
+
+            # Only consider rows with exactly one populated cell
+            if len(row_vals) != 1:
+                continue
+
+            text = row_vals[0].strip()
+            if not text or len(text) < 3 or len(text) > 120:
+                continue
+
+            # Skip dates
+            if _date_re.search(text):
+                continue
+            # Skip legal prose
+            if _legal_prose_re.search(text):
+                continue
+            # Skip address-like (has postal code, or 3+ comma-separated parts)
+            if _postal_code_re.search(text) or text.count(",") >= 2:
+                continue
+            # Skip document-type titles (report/schedule/plan/order/invoice…)
+            if _doc_title_re.search(text):
+                continue
+
+            # First surviving value is treated as the org/customer name
+            candidate_name = text
+            break
+
+        metadata: dict = {}
+        if candidate_name:
+            metadata["customer_name"] = candidate_name
+            logger.info(f"Extracted pre-header customer name: '{candidate_name}'")
+
+        return metadata
 
     @staticmethod
     def parse_csv(file_path: str) -> dict:
-        df = pd.read_csv(file_path)
-        df = df.dropna(how="all")
-        df.columns = [str(c).strip() for c in df.columns]
+        """Parse a CSV file with automatic delimiter and encoding detection.
+
+        Handles:
+        - Comma, semicolon, tab, pipe delimiters (auto-detected)
+        - UTF-8, UTF-8-BOM, Latin-1, Windows-1252 encodings
+        - Non-first-row headers (same scoring logic as Excel)
+        """
+        _ENCODINGS = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
+        df_raw: pd.DataFrame | None = None
+
+        for enc in _ENCODINGS:
+            try:
+                df_raw = pd.read_csv(
+                    file_path,
+                    sep=None,          # auto-detect: comma, semicolon, tab, pipe…
+                    engine="python",   # required for sep=None
+                    header=None,       # we do our own header detection
+                    encoding=enc,
+                    dtype=str,         # keep everything as strings initially
+                )
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                logger.warning(f"CSV parse attempt ({enc}) failed: {e}")
+                continue
+
+        if df_raw is None or df_raw.empty:
+            logger.error(f"Could not parse CSV file: {file_path}")
+            return {"error": "Could not parse CSV file", "columns": [], "rows": []}
+
+        df_raw = df_raw.dropna(how="all")
+
+        # Re-apply numeric conversion (we read as str for header detection, now coerce numbers)
+        for col in df_raw.columns:
+            converted = pd.to_numeric(df_raw[col], errors="coerce")
+            # Only replace if at least one value actually converted (avoid turning text cols numeric)
+            if converted.notna().any():
+                df_raw[col] = df_raw[col].where(converted.isna(), converted)
+
+        # Use the same smart header-row detection as Excel
+        df, _ = FileParser._normalize_excel_table(df_raw)
+
+        if df.empty:
+            return {"columns": [], "rows": []}
+
+        df.columns = FileParser._unique_headers([str(c).strip() for c in df.columns])
         columns = df.columns.tolist()
         rows = df.fillna("").to_dict(orient="records")
         rows = FileParser._sanitize_rows(rows)

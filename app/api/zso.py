@@ -10,6 +10,7 @@ from app.models.user import User, UserRole
 from app.models.email import Email
 from app.models.data import RawData, ZSOReport
 from app.schemas.data import ZSOGenerateRequest, ZSOReportResponse, ColumnMappingRequest, ColumnMappingResponse
+from app.models.data import ForexRate
 from app.services.matching_service import match_with_maini_parts
 from app.services.zso_service import build_zso_data, save_zso_report
 from app.services.excel_export import export_zso_to_excel
@@ -55,8 +56,27 @@ async def generate_zso(
     # Match with maini_parts
     matched_rows = await match_with_maini_parts(db, all_mapped_rows)
 
+    # Fetch current forex rates (most recent per currency)
+    forex_result = await db.execute(
+        select(ForexRate).order_by(ForexRate.currency_from, ForexRate.effective_date.desc())
+    )
+    all_forex = forex_result.scalars().all()
+    forex_rates: dict[str, dict] = {}
+    seen_currencies: set[str] = set()
+    for fx in all_forex:
+        if fx.currency_from not in seen_currencies:
+            seen_currencies.add(fx.currency_from)
+            forex_rates[fx.currency_from] = {
+                "rate": fx.rate,
+                "currency_to": fx.currency_to,
+                "effective_date": fx.effective_date.isoformat(),
+                "notes": fx.notes,
+            }
+    # INR→INR is always 1
+    forex_rates.setdefault("INR", {"rate": 1.0, "currency_to": "INR", "effective_date": "", "notes": "Base currency"})
+
     # Build ZSO report
-    zso_data = build_zso_data(matched_rows, kas_name=current_user.full_name)
+    zso_data = build_zso_data(matched_rows, kas_name=current_user.full_name, forex_rates=forex_rates)
 
     # Save report
     report = await save_zso_report(db, email.id, current_user, zso_data)

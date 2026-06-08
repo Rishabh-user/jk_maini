@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.data import MainiPart
@@ -24,7 +24,9 @@ async def match_with_maini_parts(
             continue
 
         result = await db.execute(
-            select(MainiPart).where(MainiPart.customer_part_no == customer_part)
+            select(MainiPart).where(
+                func.lower(MainiPart.customer_part_no) == customer_part.lower()
+            )
         )
         part = result.scalar_one_or_none()
 
@@ -34,8 +36,11 @@ async def match_with_maini_parts(
             row["Country"] = part.country or row.get("Country", "")
             row["Customer Name"] = part.customer_name or row.get("Customer Name", "")
             row["Customer Location"] = part.customer_location or row.get("Customer Location", "")
-            row["Unit Price"] = part.unit_price if part.unit_price else row.get("Unit Price", "")
-            row["Currency"] = part.currency or row.get("Currency", "INR")
+            # Unit price and currency ALWAYS come from master data only —
+            # contractual prices are authoritative; never use whatever the demand
+            # file says (it may be missing, stale, or in a different currency basis).
+            row["Unit Price"] = part.unit_price if part.unit_price is not None else ""
+            row["Currency"] = part.currency or "USD"
             row["HSN Code"] = part.hsn_code or row.get("HSN Code", "")
             row["_match_status"] = "matched"
             logger.info(f"Matched customer part '{customer_part}' -> maini part '{part.maini_part_no}'")

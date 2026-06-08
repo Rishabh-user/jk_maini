@@ -172,4 +172,10 @@ export const fetchUploads = (skip = 0, limit = 50) =>
 export const deleteUpload = (uploadId) =>
   api.delete(`/uploads/document/${uploadId}`)
 
+// ─── Forex Rates ──────────────────────────
+export const fetchForexRates = () => api.get('/forex/')
+export const fetchCurrentForexRates = () => api.get('/forex/current')
+export const addForexRate = (data) => api.post('/forex/', data)
+export const deleteForexRate = (id) => api.delete(`/forex/${id}`)
+
 export default api

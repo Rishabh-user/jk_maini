@@ -1,7 +1,7 @@
 from app.models.user import User, UserRole
 from app.models.email import Email, EmailStatus, Attachment
 from app.models.data import (
-    RawData, MainiPart, ZSOReport,
+    RawData, MainiPart, ZSOReport, ForexRate,
     DemandUpload, InventoryStock, AllocationResult,
     CoverageReport, SalesData, BudgetData,
 )
@@ -9,7 +9,7 @@ from app.models.data import (
 __all__ = [
     "User", "UserRole",
     "Email", "EmailStatus", "Attachment",
-    "RawData", "MainiPart", "ZSOReport",
+    "RawData", "MainiPart", "ZSOReport", "ForexRate",
     "DemandUpload", "InventoryStock", "AllocationResult",
     "CoverageReport", "SalesData", "BudgetData",
 ]

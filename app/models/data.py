@@ -60,6 +60,25 @@ class ZSOReport(Base):
     created_by_user: Mapped["User"] = relationship(back_populates="zso_reports")
 
 
+class ForexRate(Base):
+    """Manually entered exchange rates used for INR conversion in ZSO reports.
+
+    Finance team enters rates periodically (e.g., monthly).
+    The most recent rate for a given currency is used when generating ZSO reports.
+    The rate and its entry date are stamped on every ZSO report for transparency.
+    """
+    __tablename__ = "forex_rates"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    currency_from: Mapped[str] = mapped_column(String(10), nullable=False, index=True)  # e.g. "USD"
+    currency_to: Mapped[str] = mapped_column(String(10), nullable=False, default="INR")
+    rate: Mapped[float] = mapped_column(Float, nullable=False)                           # e.g. 84.5
+    effective_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    entered_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), index=True)
+    notes: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class DemandUpload(Base):
     __tablename__ = "demand_uploads"
 

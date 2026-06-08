@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2, FileUp, FolderUp, Loader2, Upload, XCircle } from 'lucide-react'
 import { uploadDemandFiles } from '../services/api'
 
-const SUPPORTED_EXTENSIONS = ['pdf', 'xlsx', 'xls', 'csv', 'png', 'jpg', 'jpeg', 'tiff', 'bmp']
+const SUPPORTED_EXTENSIONS = ['pdf', 'xlsx', 'xls', 'csv', 'slk', 'msg', 'eml', 'png', 'jpg', 'jpeg', 'tiff', 'bmp']
 
 function fileKey(file) {
   return `${file.webkitRelativePath || file.name}-${file.size}-${file.lastModified}`
@@ -108,7 +108,7 @@ export default function UploadDemand() {
                   type="file"
                   multiple
                   className="hidden"
-                  accept=".pdf,.xlsx,.xls,.csv,.png,.jpg,.jpeg,.tiff,.bmp"
+                  accept=".pdf,.xlsx,.xls,.csv,.slk,.msg,.eml,.png,.jpg,.jpeg,.tiff,.bmp"
                   onChange={(e) => addFiles(e.target.files)}
                 />
               </label>
