@@ -365,7 +365,8 @@ export default function ZSOReports() {
       { field: 'openQty',      headerName: 'Open Qty',            minWidth: 110, filter: 'agNumberColumnFilter', type: 'numericColumn' },
       { field: 'unitPrice',    headerName: 'Unit Price',          minWidth: 110, filter: 'agNumberColumnFilter', type: 'numericColumn' },
       { field: 'currency',     headerName: 'Currency',            minWidth: 100, filter: 'agSetColumnFilter', cellStyle: { textAlign: 'center' } },
-      { field: 'unitPriceInr', headerName: 'Unit Price INR',      minWidth: 130, filter: 'agNumberColumnFilter', type: 'numericColumn' },
+      { field: 'unitPriceInr', headerName: 'Unit Price INR',      minWidth: 130, filter: 'agNumberColumnFilter', type: 'numericColumn',
+        valueFormatter: p => p.value != null ? `₹${Number(p.value).toLocaleString('en-IN')}` : '₹0' },
       {
         field: 'totalInr',     headerName: 'Total in INR',        minWidth: 145, filter: 'agNumberColumnFilter', type: 'numericColumn',
         valueFormatter: p => p.value != null ? `₹${Number(p.value).toLocaleString('en-IN')}` : '₹0',

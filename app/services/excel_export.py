@@ -38,7 +38,7 @@ DISPLAY_HEADERS = {
     "doc_date": "Doc Date",
     "ship_date": "Ship Date",
     "sales_month": "Sales Month",
-    "row_id": "Row ID",
+    "row_id": "UUID",
 }
 
 
@@ -121,6 +121,21 @@ def export_zso_to_excel(
     if forecast_expanded > 0:
         logger.info(f"Export: expanded forecast rows → {len(items)} total rows (was {len(raw_items)})")
 
+    # Back-fill row_id for reports generated before UUID was introduced.
+    # Uses the same deterministic UUID5 logic as _compute_row_id in uploads.py.
+    import uuid as _uuid
+    for idx, item in enumerate(items):
+        if not item.get("row_id"):
+            key = "|".join([
+                str(item.get("cust_part_no", "") or "").strip().lower(),
+                str(item.get("po_forecast", "") or "").strip().lower(),
+                str(item.get("ship_date", "") or "").strip(),
+                str(item.get("customer_name", "") or "").strip().lower(),
+            ])
+            if not key.replace("|", "").strip():
+                key = f"__empty_row_{idx}__"
+            item["row_id"] = str(_uuid.uuid5(_uuid.NAMESPACE_URL, key))
+
     df = pd.DataFrame(items)
     # Apply column visibility filter if provided (from the frontend Columns panel)
     if visible_columns:
@@ -137,8 +152,9 @@ def export_zso_to_excel(
             "rowId": "row_id",
         }
         backend_cols = [_frontend_to_backend.get(c, c) for c in visible_columns]
-        # Always keep sr_no; filter COLUMNS_ORDER to only include visible ones
-        ordered = ["sr_no"] + [c for c in COLUMNS_ORDER if c != "sr_no" and c in backend_cols]
+        # sr_no always first; row_id always last (never filtered out — needed for tracking)
+        middle = [c for c in COLUMNS_ORDER if c not in ("sr_no", "row_id") and c in backend_cols]
+        ordered = ["sr_no"] + middle + ["row_id"]
     else:
         ordered = COLUMNS_ORDER
     df = df[[c for c in ordered if c in df.columns]]

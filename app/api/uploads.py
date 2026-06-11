@@ -19,6 +19,21 @@ from app.utils.logging import logger
 settings = get_settings()
 router = APIRouter(prefix="/uploads", tags=["Document Upload"])
 
+# ── Dynamic Customer Part # detection ────────────────────────────────────────
+# Column names that SUGGEST "customer part number" (any of these words present)
+_PART_COL_HINT_RE = re.compile(
+    r"\b(part|item|ref(?:erence)?|article|component|comp|pièce|piéce|repère)\b"
+    r"|p[./]?n\.?",   # P/N, P.N., PN — not word-bounded because of special chars
+    re.IGNORECASE,
+)
+# Column names that EXCLUDE a part-hint (the column is something else even if name has "part/item")
+_PART_COL_EXCLUDE_RE = re.compile(
+    r"desc|cost|price|date|qty|quantity|type|status|name|uom|unit|"
+    r"comment|remark|version|revision|seq|line|order|po\b|extended|"
+    r"drawing|dwg|config|program|buyer|supplier(?!.*(part|item))",
+    re.IGNORECASE,
+)
+
 # Matches column names that represent date/period forecast buckets:
 #   ISO dates   : "2026-10-26", "2026-10-26 00:00:00"  (SAP weekly columns)
 #   Month-year  : "Aug. 2025", "Sep 2025", "August 2025"  (ASCO monthly columns)
@@ -51,6 +66,50 @@ def _compute_row_id(row: dict, index: int) -> str:
     return str(_uuid.uuid5(_uuid.NAMESPACE_URL, key))
 
 
+def _looks_like_part_number(value) -> bool:
+    """Return True if a cell value looks like a customer part number rather than
+    an SAP line sequence (10, 20, 30…) or other non-part numeric field.
+
+    Part numbers typically:
+    - Contain hyphens  (e.g. 307-936-702-0, C-SN-1234-00, EN4561B06-1)
+    - OR contain letters mixed with digits (e.g. 9111M74P01, MS9197-04)
+    - OR are long alphanumeric codes (> 6 chars with no spaces)
+
+    SAP line sequences are pure short integers: 10, 20, 30 … 990.
+    """
+    s = str(value or "").strip()
+    if not s or s.lower() in ("nan", "none", ""):
+        return False
+    # Pure integer ≤ 4 digits → SAP line sequence / line number, NOT a part number
+    if re.fullmatch(r"\d{1,4}", s):
+        return False
+    # Contains a hyphen → almost certainly a part number
+    if "-" in s:
+        return True
+    # Contains both letters and digits (alphanumeric part code)
+    if re.search(r"[A-Za-z]", s) and re.search(r"\d", s):
+        return True
+    # Long pure-numeric string (≥ 7 digits) — could be a part code
+    if re.fullmatch(r"\d{7,}", s):
+        return True
+    return False
+
+
+def _col_hints_at_part(col_name: str) -> bool:
+    """Return True if a column name looks like it holds customer part numbers.
+
+    Uses module-level _PART_COL_HINT_RE / _PART_COL_EXCLUDE_RE so the check is
+    driven by word-level rules, not a hardcoded list of column names.
+
+    Examples that return True:  "Part", "Item", "Item No", "P/N", "Reference",
+                                 "Component", "Comp Part", "Article", "Part No."
+    Examples that return False: "Item Description", "Item Cost", "Part Description",
+                                 "Item Type", "Order Date", "PO", "Line"
+    """
+    name = str(col_name).strip()
+    return bool(_PART_COL_HINT_RE.search(name)) and not bool(_PART_COL_EXCLUDE_RE.search(name))
+
+
 def _build_mapped_rows(
     raw_rows: list[dict],
     column_mapping: dict,
@@ -59,16 +118,26 @@ def _build_mapped_rows(
     """Map raw extracted rows to system column names.
 
     Rules:
-    - UNMAPPED columns are skipped, EXCEPT date-like column headers whose
-      numeric values are collected into forecast_schedule {date: qty}.
+    - UNMAPPED columns are skipped, EXCEPT:
+        a) Date-like column headers → collected into forecast_schedule {date: qty}.
+        b) Ambiguous columns (e.g. "Item") whose VALUES look like part numbers →
+           used as Customer Part # fallback when no other part # was found.
     - First non-empty write wins (prevents later columns clobbering earlier ones
       that map to the same target, e.g. PO VERSION overwriting PURCHASE ORDER).
     - customer_name from file_metadata is injected if not already in the row.
     - A deterministic _row_id (UUID5) is stamped on every row for change-tracking.
+
+    Ambiguous-column note:
+    "Item" in SAP = line sequence (10, 20, 30 …) → UNMAPPED.
+    "Item" in Safran HAL PO = customer part number (307-936-702-0) → should be Customer Part #.
+    We detect the difference by inspecting the cell values at row-build time.
     """
     mapped_data = []
     for i, row in enumerate(raw_rows):
         mapped_row: dict = {}
+        # Collect UNMAPPED cells that might be part numbers (for fallback below)
+        unmapped_part_candidates: list[tuple[str, object]] = []
+
         for src_col, value in row.items():
             # Date-bucket columns come from forecast files where each date/period header
             # represents a demand quantity for that week/month.
@@ -89,12 +158,38 @@ def _build_mapped_rows(
 
             target_col = column_mapping.get(src_col, src_col)
             if target_col == "UNMAPPED":
+                # Stash for part-number fallback — check value after the full row is mapped
+                unmapped_part_candidates.append((src_col, value))
                 continue
 
             # First-write wins — don't overwrite an already-set non-empty value
             if target_col in mapped_row and mapped_row[target_col] not in ("", None):
                 continue
             mapped_row[target_col] = value
+
+        # ── Customer Part # fallback ─────────────────────────────────────────
+        # If no Customer Part # was mapped (e.g. Safran HAL PO "Item" column,
+        # or any file with "Part", "P/N", "Component", "Reference", etc.),
+        # detect it dynamically by checking UNMAPPED column names + cell values.
+        #
+        # Pass 1 — column name hints at part number AND value looks like one
+        #           (e.g. "Item" → "307-936-702-0", "Part" → "649-481-136-0")
+        # Pass 2 — broader: any UNMAPPED column with a part-number-like value
+        #           (catches exotic/unlabelled columns)
+        if not mapped_row.get("Customer Part #"):
+            # Pass 1: name-guided
+            for src_col, value in unmapped_part_candidates:
+                if _col_hints_at_part(str(src_col)) and _looks_like_part_number(value):
+                    mapped_row["Customer Part #"] = value
+                    logger.debug(f"Part# fallback (name hint): col='{src_col}' → '{value}'")
+                    break
+            # Pass 2: value-guided (broader sweep)
+            if not mapped_row.get("Customer Part #"):
+                for src_col, value in unmapped_part_candidates:
+                    if _looks_like_part_number(value):
+                        mapped_row["Customer Part #"] = value
+                        logger.debug(f"Part# fallback (value scan): col='{src_col}' → '{value}'")
+                        break
 
         # Inject customer name from file-level metadata when not present in the row
         if not mapped_row.get("Customer Name") and file_metadata.get("customer_name"):

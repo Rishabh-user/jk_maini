@@ -37,6 +37,30 @@ EXACT_COLUMN_MAP = {
     "part number / eng rev": "Customer Part #",
     "part no": "Customer Part #",
     "part number": "Customer Part #",
+    "part nbr": "Customer Part #",           # Parker portal
+    "part no.": "Customer Part #",
+    # Bare "Part" — used in many customer PDFs / portals as the part number column
+    "part": "Customer Part #",
+    "p/n": "Customer Part #",
+    "p.n.": "Customer Part #",
+    "pn": "Customer Part #",
+    # Component / Comp — Safran HAL, aerospace files
+    "comp part": "Customer Part #",
+    "comp part no": "Customer Part #",
+    "comp part number": "Customer Part #",
+    "comp. part no": "Customer Part #",
+    "comp. part number": "Customer Part #",
+    "component": "Customer Part #",
+    "component no": "Customer Part #",
+    "component number": "Customer Part #",
+    "component part": "Customer Part #",
+    "component part no": "Customer Part #",
+    "component part number": "Customer Part #",
+    # "Item Number" in demand/forecast files (Woodward, ASCO) = customer part number.
+    # Note: SAP uses bare "ITEM" (without "number") for line sequences → that stays UNMAPPED.
+    "item number": "Customer Part #",
+    # In some customer portals "Reference" = part reference / customer part number
+    "reference": "Customer Part #",
     # French / other languages
     "référence": "Customer Part #",
     "reference article": "Customer Part #",
@@ -53,11 +77,15 @@ EXACT_COLUMN_MAP = {
     "maini part #": "Maini Part #",
     "maini part no": "Maini Part #",
     "maini part number": "Maini Part #",
-    "vendor item": "Maini Part #",   # vendor = Maini; vendor's item = Maini part #
+    "vendor item": "Maini Part #",           # vendor = Maini; vendor's item = Maini part #
     "vendor part": "Maini Part #",
     "supplier item": "Maini Part #",
     "supplier part": "Maini Part #",
+    "supplier material number": "Maini Part #",  # AirSupply forecast format
     "your material reference": "Maini Part #",
+    "mfg item no": "Maini Part #",           # Woodward — manufacturer (Maini) item number
+    "mfg item number": "Maini Part #",
+    "mfg no": "Maini Part #",
     # ── Description ──────────────────────────────────────────────────────
     "desc": "Description",
     "description": "Description",
@@ -65,6 +93,7 @@ EXACT_COLUMN_MAP = {
     "material description": "Description",
     "item description": "Description",
     "item spec": "Description",
+    "part description": "Description",       # Parker portal
     # French
     "désignation": "Description",
     "designation": "Description",
@@ -80,9 +109,18 @@ EXACT_COLUMN_MAP = {
     "rem. qty": "Quantity",
     "remaining qty": "Quantity",
     "remaining quantity": "Quantity",
+    "remaining quantity to be shipped": "Quantity",  # Safran S2 portal — actual open/remaining
     "po quantity": "Quantity",
     "order qty": "Quantity",
     "ordered qty": "Quantity",
+    "ordered": "Quantity",                   # Safran HAL Excel
+    "qty ordered": "Quantity",               # Suzhou ePO
+    "open sched qty": "Quantity",            # Parker portal — open schedule quantity
+    "open schedule qty": "Quantity",
+    "planned qty": "Quantity",               # Woodward forecast — planned demand quantity
+    "planned quantity": "Quantity",
+    "requested quantity": "Quantity",        # Safran S2 portal
+    "demand quantity": "Quantity",
     # French
     "quantité": "Quantity",
     "qté": "Quantity",
@@ -94,7 +132,8 @@ EXACT_COLUMN_MAP = {
     "unit price per pc": "Unit Price",
     "pre-tax unit price": "Unit Price",
     "price per unit": "Unit Price",
-    "unit cost": "Unit Price",
+    "unit cost": "Unit Price",               # Woodward forecast
+    "item cost": "Unit Price",               # Safran HAL Excel
     "price": "Unit Price",
     # French
     "prix unitaire": "Unit Price",
@@ -111,10 +150,16 @@ EXACT_COLUMN_MAP = {
     "po no.": "PO Number",
     "po": "PO Number",
     "po #": "PO Number",
+    "po nbr": "PO Number",                   # Parker portal
     "order number": "PO Number",
     "order no": "PO Number",
     "order ref": "PO Number",
     "order reference": "PO Number",
+    "order/requisition": "PO Number",        # Woodward — order or procurement requisition
+    "requisition": "PO Number",
+    "po/pos number": "PO Number",            # Safran S1 customer portal
+    "blanket nbr": "PO Number",              # Parker — blanket purchase order number
+    "blanket number": "PO Number",
     # French
     "commande": "PO Number",
     "n° commande": "PO Number",
@@ -130,6 +175,17 @@ EXACT_COLUMN_MAP = {
     "required date": "Delivery Date",
     "required by": "Delivery Date",
     "due date": "Delivery Date",
+    "need date": "Delivery Date",            # Parker portal — customer's need-by date
+    "demand/due date": "Delivery Date",      # Woodward forecast
+    "promise date": "Delivery Date",         # Parker / Woodward — confirmed delivery date
+    "promised date": "Delivery Date",
+    "pick-up date": "Delivery Date",         # ASCO portal
+    "pick up date": "Delivery Date",
+    "safran due date": "Delivery Date",      # Suzhou/Snecma ePO
+    "vendor due date": "Delivery Date",      # Suzhou/Snecma ePO
+    "date of demand": "Delivery Date",       # Safran S1 portal (customer's demand date)
+    "requested date": "Delivery Date",       # Safran S2 portal
+    "request date": "Delivery Date",
     # French
     "date livraison": "Delivery Date",
     "date de livraison": "Delivery Date",
@@ -139,21 +195,28 @@ EXACT_COLUMN_MAP = {
     "doc date": "PO Date",
     "order date": "PO Date",
     "document date": "PO Date",
+    "po order date": "PO Date",              # Safran HAL Excel
+    "creation date": "PO Date",              # ASCO — PO creation date
     # ── Remarks ──────────────────────────────────────────────────────────
     "supplier comments": "Remarks",
     "comments": "Remarks",
     "remarks": "Remarks",
-    "status": "Remarks",      # LATE/FIRM/PREV from SYLK/SLK files
+    "status": "Remarks",                     # LATE/FIRM/PREV from SYLK/SLK files
+    "supplier comment": "Remarks",           # Safran S2 portal
+    "customer comment": "Remarks",           # Safran S2 portal
+    # ────────────────────────────────────────────────────────────────────
+    # UNMAPPED — columns that exist in customer files but do NOT map to any
+    # ZSO field.  Explicitly marking them prevents the AI from guessing wrong.
+    # ────────────────────────────────────────────────────────────────────
+    # SAP Vendor Schedule specific
     "supplier commitment date": "UNMAPPED",
     "statistic date": "UNMAPPED",
     "supplier description": "UNMAPPED",
     "base uom": "UNMAPPED",
-    # SAP / Safran Procurement Plan columns that must NOT be confused with mapped fields
     "po version": "UNMAPPED",
-    "item": "UNMAPPED",
+    "item": "UNMAPPED",          # SAP line item sequence (10, 20, 30...) — not a part number
     "item type": "UNMAPPED",
-    "item no": "UNMAPPED",
-    "item number": "UNMAPPED",
+    "item no": "UNMAPPED",       # SAP internal item number
     "line item": "UNMAPPED",
     "supplier code": "UNMAPPED",
     "contract": "UNMAPPED",
@@ -169,6 +232,52 @@ EXACT_COLUMN_MAP = {
     "order version": "UNMAPPED",
     "doc version": "UNMAPPED",
     "version": "UNMAPPED",
+    # Quantities that are NOT the open demand qty
+    "firm qty": "UNMAPPED",          # Woodward — subset of planned qty; use planned qty for ZSO
+    "yr req/rem bal": "UNMAPPED",    # Annual remaining balance — not line-level open qty
+    "promised quantity": "UNMAPPED", # Supplier's commitment — not customer demand
+    "in transit qty": "UNMAPPED",    # Stock in transit
+    "qty received": "UNMAPPED",      # Already received — not open
+    "qty rejected": "UNMAPPED",
+    "last rcpt qty": "UNMAPPED",
+    # Revision / sequence / internal identifiers
+    "revision": "UNMAPPED",
+    "sched rel": "UNMAPPED",
+    "blanket po rel": "UNMAPPED",
+    "delivery seq": "UNMAPPED",
+    "line": "UNMAPPED",
+    "line no": "UNMAPPED",
+    # UoM — not a ZSO output field
+    "unit of measure": "UNMAPPED",
+    "uom": "UNMAPPED",
+    "u.m.": "UNMAPPED",
+    "u/m": "UNMAPPED",
+    # Cost / financial fields we calculate ourselves
+    "extended cost": "UNMAPPED",     # Line total = qty × price — we calculate this
+    # Other non-demand fields
+    "demand type": "UNMAPPED",
+    "mfg name": "UNMAPPED",          # Manufacturer name = Maini — not a data field for ZSO
+    "drawing number": "UNMAPPED",
+    "drawing nbr": "UNMAPPED",
+    "drawing no": "UNMAPPED",
+    "bucket": "UNMAPPED",            # AirSupply forecast period bucket
+    "supplier pct share": "UNMAPPED",
+    "ecl": "UNMAPPED",               # Engineering change level
+    "ppap req": "UNMAPPED",
+    "wo": "UNMAPPED",                # Work order
+    "wo nr": "UNMAPPED",
+    "op nr": "UNMAPPED",
+    "invoice no": "UNMAPPED",
+    "program": "UNMAPPED",
+    "container type": "UNMAPPED",
+    "asco location": "UNMAPPED",
+    "buyer full name": "UNMAPPED",
+    "buyer code": "UNMAPPED",
+    "mqi rev nbr": "UNMAPPED",
+    "p2p active": "UNMAPPED",
+    "po type": "UNMAPPED",
+    "po sl": "UNMAPPED",
+    "po line": "UNMAPPED",
 }
 
 MAPPING_PROMPT_TEMPLATE = """You are a data mapping expert for a manufacturing parts management system.

@@ -75,6 +75,38 @@ async def generate_zso(
     # INR→INR is always 1
     forex_rates.setdefault("INR", {"rate": 1.0, "currency_to": "INR", "effective_date": "", "notes": "Base currency"})
 
+    # ── Enrich with internal forecast data ──────────────────────────────
+    # Primary match: by customer part number (always present, customer name often missing).
+    # Fallback: by customer name (catches parts not in the demand file at all).
+    from app.services.forecast_service import get_forecast_rows_by_parts, get_forecast_rows_for_zso
+
+    # 1. Match forecast by customer part numbers present in demand rows
+    demand_part_numbers = list({
+        r.get("Customer Part #", "").strip()
+        for r in matched_rows
+        if r.get("Customer Part #", "").strip()
+    })
+    forecast_rows = await get_forecast_rows_by_parts(db, demand_part_numbers)
+
+    # 2. Fallback: for any customer name in demand, pick up forecast parts NOT already matched
+    #    (e.g. forecast parts for this customer that weren't in this specific demand file)
+    already_matched_parts = {r["Customer Part #"].strip().lower() for r in forecast_rows}
+    customer_names_in_demand = list({
+        r.get("Customer Name", "").strip()
+        for r in matched_rows
+        if r.get("Customer Name", "").strip()
+    })
+    for cname in customer_names_in_demand:
+        extra_rows = await get_forecast_rows_for_zso(db, cname)
+        new_rows = [r for r in extra_rows if r["Customer Part #"].strip().lower() not in already_matched_parts]
+        if new_rows:
+            forecast_rows.extend(new_rows)
+            already_matched_parts.update(r["Customer Part #"].strip().lower() for r in new_rows)
+
+    if forecast_rows:
+        matched_rows = list(matched_rows) + forecast_rows
+        logger.info(f"ZSO enriched with {len(forecast_rows)} internal forecast rows")
+
     # Build ZSO report
     zso_data = build_zso_data(matched_rows, kas_name=current_user.full_name, forex_rates=forex_rates)
 

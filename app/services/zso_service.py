@@ -112,6 +112,30 @@ def build_zso_data(matched_rows: list[dict], kas_name: str, forex_rates: dict | 
             f"with forecast_schedule attached for UI drill-down"
         )
 
+    # ── Re-order: group each Internal Forecast row directly after its PO rows ──
+    # Build part-order from the first non-forecast appearance of each cust_part_no,
+    # preserving the original demand order.  Forecast rows for the same part are
+    # inserted immediately after the last PO row for that part.
+    # Parts that appear only in the forecast (no PO) go at the end.
+    part_order: dict[str, int] = {}
+    for item in zso_items:
+        pn = str(item.get("cust_part_no") or "").strip()
+        if pn and pn not in part_order and item.get("po_forecast", "") != "Internal Forecast":
+            part_order[pn] = len(part_order)
+
+    def _sort_key(item: dict) -> tuple:
+        pn = str(item.get("cust_part_no") or "").strip()
+        is_forecast = 1 if item.get("po_forecast") == "Internal Forecast" else 0
+        # Parts seen in demand get their demand-order index; forecast-only parts go last
+        order = part_order.get(pn, len(part_order) + 9999)
+        return (order, is_forecast)
+
+    zso_items.sort(key=_sort_key)
+
+    # Re-number sr_no sequentially after sort
+    for idx, item in enumerate(zso_items, start=1):
+        item["sr_no"] = idx
+
     # Only stamp forex rates that were actually used (currencies present in the report)
     used_currencies = {item["currency"] for item in zso_items if item.get("currency")}
     forex_used = {

@@ -106,6 +106,15 @@ export const uploadDemandFile = (file, uploadType) => {
   })
 }
 export const fetchDemandReports = () => api.get('/demand/reports')
+export const fetchDemandUploads = (type) => api.get('/demand/uploads', { params: type ? { upload_type: type } : {} })
+export const previewDemandUpload = (id) => api.get(`/demand/uploads/${id}/preview`)
+export const deleteDemandUpload = (id) => api.delete(`/demand/uploads/${id}`)
+
+export const fetchCorrections = (status) => api.get('/demand/corrections', { params: status ? { status } : {} })
+export const fetchCorrectionStats = () => api.get('/demand/corrections/stats')
+export const createCorrection = (data) => api.post('/demand/corrections', data)
+export const reviewCorrection = (id, data) => api.put(`/demand/corrections/${id}/review`, data)
+export const deleteCorrection = (id) => api.delete(`/demand/corrections/${id}`)
 
 // ─── Inventory & Liquidation ────────────────
 export const fetchInventorySummary = () => api.get('/inventory/summary')
@@ -123,6 +132,9 @@ export const runAllocation = (allocationType, zsoReportId) => {
 }
 export const fetchAllocations = () => api.get('/inventory/allocations')
 export const fetchAllocationDetail = (id) => api.get(`/inventory/allocations/${id}`)
+export const deleteStock = (stockType) =>
+  api.delete('/inventory/stock', { params: stockType ? { stock_type: stockType } : {} })
+export const deleteAllocations = () => api.delete('/inventory/allocations')
 
 // ─── Coverage Report ────────────────────────
 export const generateCoverage = (allocationId) => {
@@ -181,5 +193,19 @@ export const fetchForexRates = () => api.get('/forex/')
 export const fetchCurrentForexRates = () => api.get('/forex/current')
 export const addForexRate = (data) => api.post('/forex/', data)
 export const deleteForexRate = (id) => api.delete(`/forex/${id}`)
+
+// ─── Internal Forecast Data ──────────────────
+export const fetchForecastSummary = () => api.get('/forecast-data/summary')
+export const fetchForecastParts = (customer) => api.get('/forecast-data/parts', { params: { customer } })
+export const uploadForecastFile = (file, customerName) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('customer_name', customerName)
+  return api.post('/forecast-data/upload', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+export const deleteForecastCustomer = (customerName) =>
+  api.delete(`/forecast-data/${encodeURIComponent(customerName)}`)
 
 export default api

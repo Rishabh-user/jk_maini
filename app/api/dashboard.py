@@ -16,26 +16,43 @@ async def get_dashboard_stats(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    total_emails = (await db.execute(select(func.count(Email.id)))).scalar() or 0
-    processed_emails = (await db.execute(
-        select(func.count(Email.id)).where(Email.status == EmailStatus.PROCESSED)
+    # Emails = fetched from Gmail (gmail_message_id does NOT start with "manual-upload-")
+    # Manual uploads = uploaded via Upload Document page (gmail_message_id starts with "manual-upload-")
+    is_manual = Email.gmail_message_id.like("manual-upload-%")
+    is_email  = ~is_manual
+
+    total_emails = (await db.execute(
+        select(func.count(Email.id)).where(is_email)
     )).scalar() or 0
-    total_attachments = (await db.execute(select(func.count(Attachment.id)))).scalar() or 0
-    total_zso = (await db.execute(select(func.count(ZSOReport.id)))).scalar() or 0
+    processed_emails = (await db.execute(
+        select(func.count(Email.id)).where(is_email, Email.status == EmailStatus.PROCESSED)
+    )).scalar() or 0
     pending_emails = (await db.execute(
-        select(func.count(Email.id)).where(Email.status == EmailStatus.UNPROCESSED)
+        select(func.count(Email.id)).where(is_email, Email.status == EmailStatus.UNPROCESSED)
     )).scalar() or 0
     failed_emails = (await db.execute(
-        select(func.count(Email.id)).where(Email.status == EmailStatus.FAILED)
+        select(func.count(Email.id)).where(is_email, Email.status == EmailStatus.FAILED)
     )).scalar() or 0
+
+    total_manual = (await db.execute(
+        select(func.count(Email.id)).where(is_manual)
+    )).scalar() or 0
+    processed_manual = (await db.execute(
+        select(func.count(Email.id)).where(is_manual, Email.status == EmailStatus.PROCESSED)
+    )).scalar() or 0
+
+    total_attachments = (await db.execute(select(func.count(Attachment.id)))).scalar() or 0
+    total_zso = (await db.execute(select(func.count(ZSOReport.id)))).scalar() or 0
 
     return {
         "total_emails": total_emails,
         "processed_emails": processed_emails,
-        "total_attachments": total_attachments,
-        "total_zso": total_zso,
         "pending_emails": pending_emails,
         "failed_emails": failed_emails,
+        "total_manual": total_manual,
+        "processed_manual": processed_manual,
+        "total_attachments": total_attachments,
+        "total_zso": total_zso,
     }
 
 

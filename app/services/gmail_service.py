@@ -39,13 +39,31 @@ class GmailService:
                 except Exception as e:
                     logger.warning(f"Could not save refreshed token to file: {e}")
             else:
-                # On production (headless server), we cannot open a browser.
-                # The token.json must be provided via GMAIL_TOKEN_B64 env var.
-                raise RuntimeError(
-                    "Gmail token is missing or invalid and cannot be refreshed. "
-                    "Please re-authenticate locally and update the GMAIL_TOKEN_B64 "
-                    "environment variable on Render with a fresh token."
-                )
+                # Try local browser-based OAuth flow first (dev / local machine).
+                # Falls back to GMAIL_TOKEN_B64 env var for headless production servers.
+                token_b64 = os.environ.get("GMAIL_TOKEN_B64", "").strip()
+                if token_b64:
+                    import base64 as _b64
+                    token_json = _b64.b64decode(token_b64).decode("utf-8")
+                    import tempfile, json as _json
+                    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+                    tmp.write(token_json); tmp.flush(); tmp.close()
+                    creds = Credentials.from_authorized_user_file(tmp.name, self.scopes)
+                    os.unlink(tmp.name)
+                elif os.path.exists(settings.GMAIL_CREDENTIALS_FILE):
+                    logger.info("No valid Gmail token — launching browser OAuth flow...")
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        settings.GMAIL_CREDENTIALS_FILE, self.scopes
+                    )
+                    creds = flow.run_local_server(port=0)
+                    with open(settings.GMAIL_TOKEN_FILE, "w") as token:
+                        token.write(creds.to_json())
+                    logger.info("New Gmail token saved to token.json")
+                else:
+                    raise RuntimeError(
+                        "Gmail token is missing and credentials.json not found. "
+                        "Place credentials.json in the project root or set GMAIL_TOKEN_B64."
+                    )
 
         self.service = build("gmail", "v1", credentials=creds)
         logger.info("Gmail API authenticated successfully")

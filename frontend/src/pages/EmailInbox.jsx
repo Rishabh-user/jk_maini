@@ -88,7 +88,7 @@ export default function EmailInbox() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Email Inbox</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Incoming purchase orders and communications ({total} total)
+          Incoming purchase orders and communications ({filtered.length} total)
         </p>
       </div>
 

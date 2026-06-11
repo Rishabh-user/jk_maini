@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Mail, Paperclip, FileSpreadsheet, AlertTriangle } from 'lucide-react'
+import { Mail, Paperclip, FileSpreadsheet, AlertTriangle, Upload } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
 import { fetchDashboardStats, fetchRecentActivity } from '../services/api'
 
@@ -78,13 +78,20 @@ export default function Dashboard() {
       </div>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
         <StatCard
           title="Total Emails Processed"
           value={stats?.processed_emails?.toLocaleString() || '0'}
           subtitle={`${stats?.total_emails || 0} total received`}
           icon={Mail}
           color="blue"
+        />
+        <StatCard
+          title="Total Manually Processed"
+          value={stats?.processed_manual?.toLocaleString() || '0'}
+          subtitle={`${stats?.total_manual || 0} total uploaded`}
+          icon={Upload}
+          color="indigo"
         />
         <StatCard
           title="Total Attachments"

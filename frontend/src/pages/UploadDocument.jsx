@@ -302,7 +302,7 @@ export default function UploadDocument() {
           <table className="w-full">
             <thead>
               <tr className="bg-gray-50 border-b border-gray-200">
-                {['File', 'Type', 'Size', 'Rows', 'Status', 'Uploaded', 'Actions'].map((h) => (
+                {['#', 'File', 'Type', 'Size', 'Rows', 'Status', 'Uploaded', 'Actions'].map((h) => (
                   <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-4 py-3 whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -310,14 +310,14 @@ export default function UploadDocument() {
             <tbody>
               {filteredUploads.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-6 py-12 text-center">
+                  <td colSpan={8} className="px-6 py-12 text-center">
                     <Upload size={36} className="mx-auto text-gray-300 mb-3" />
                     <p className="text-sm text-gray-500">No documents uploaded yet</p>
                     <p className="text-xs text-gray-400 mt-1">Upload files above to get started</p>
                   </td>
                 </tr>
               ) : (
-                filteredUploads.map((upload) => {
+                filteredUploads.map((upload, idx) => {
                   const FileIcon = FILE_ICONS[upload.source_type] || File
                   const statusCfg = STATUS_CONFIG[(upload.status || '').toLowerCase()] || STATUS_CONFIG.unprocessed
                   const StatusIcon = statusCfg.icon
@@ -326,6 +326,7 @@ export default function UploadDocument() {
                   return (
                     <Fragment key={upload.id}>
                       <tr className="border-b border-gray-100 hover:bg-gray-50">
+                        <td className="px-4 py-3 text-xs text-gray-400 font-medium w-10">{idx + 1}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <FileIcon size={16} className="text-blue-600 flex-shrink-0" />
@@ -387,7 +388,7 @@ export default function UploadDocument() {
                       {/* Expanded Raw Data Viewer */}
                       {isExpanded && (
                         <tr>
-                          <td colSpan={7} className="p-0">
+                          <td colSpan={8} className="p-0">
                             <RawDataPreview
                               uploadId={upload.id}
                               data={rawData[upload.id]}

@@ -60,6 +60,25 @@ class ZSOReport(Base):
     created_by_user: Mapped["User"] = relationship(back_populates="zso_reports")
 
 
+class ForecastEntry(Base):
+    """Internal forecast data uploaded by Maini (e.g. Safran HAL Maini Forecast).
+
+    Each row represents one part × one period (month) with its forecast quantity.
+    The linking key to ZSO / master data is customer_part_no (= Comp. Part Number in the file).
+    """
+    __tablename__ = "forecast_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    customer_name: Mapped[str] = mapped_column(String(255), index=True)       # e.g. "Safran HAL"
+    part_number: Mapped[str] = mapped_column(String(255), index=True)         # Customer part # (Comp. Part Number)
+    period: Mapped[str] = mapped_column(String(30))                            # e.g. "Nov-2025"
+    period_date: Mapped[datetime | None] = mapped_column(DateTime)             # parsed first day of month for sorting
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    source_file: Mapped[str | None] = mapped_column(String(500))
+    uploaded_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ForexRate(Base):
     """Manually entered exchange rates used for INR conversion in ZSO reports.
 
@@ -146,4 +165,27 @@ class BudgetData(Base):
     fiscal_year: Mapped[str] = mapped_column(String(20), index=True)
     filename: Mapped[str] = mapped_column(String(500))
     monthly_data: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MasterDataCorrection(Base):
+    """Correction requests for master data fields submitted by KAS / admin.
+
+    Workflow: KAS submits a request → Admin approves or rejects.
+    On approval the corresponding MainiPart record is automatically updated.
+    """
+    __tablename__ = "master_data_corrections"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    customer_part_no: Mapped[str] = mapped_column(String(255), index=True)
+    customer_name: Mapped[str | None] = mapped_column(String(255))
+    field_name: Mapped[str] = mapped_column(String(100))   # e.g. "maini_part_no", "unit_price", "description"
+    old_value: Mapped[str | None] = mapped_column(String(500))
+    new_value: Mapped[str] = mapped_column(String(500))
+    reason: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(50), default="pending", index=True)  # pending | approved | rejected
+    requested_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), index=True)
+    reviewed_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_notes: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
