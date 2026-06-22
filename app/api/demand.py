@@ -1,4 +1,5 @@
 import io
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -9,10 +10,56 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.models.user import User, UserRole
-from app.models.data import RawData, ZSOReport, DemandUpload, MainiPart, MasterDataCorrection
+from app.models.email import Email
+from app.models.data import RawData, ZSOReport, DemandUpload, MainiPart, MasterDataCorrection, DemandFollowUp
 from app.utils.security import get_current_user, require_roles
 from app.utils.logging import logger
 from app.services.file_parser import FileParser
+
+# ── Comparison tuning thresholds ────────────────────────────────────────────
+OVERLAP_THRESHOLD = 0.30      # min part-number overlap (shared / smaller set) to be "comparable"
+MINOR_CHANGE_THRESHOLD = 0.10  # <10% total-qty change between versions = minor bump (v2.1)
+ABRUPT_CHANGE_THRESHOLD = 0.50  # >50% per-row qty swing = flag for customer follow-up
+
+
+def _report_part_set(report_data: dict | None) -> set[str]:
+    """Distinct customer part numbers in a report (lower-cased, trimmed)."""
+    parts: set[str] = set()
+    if not report_data or not isinstance(report_data, dict):
+        return parts
+    for item in report_data.get("items", []):
+        p = str(item.get("cust_part_no") or item.get("customer_part_no") or "").strip().lower()
+        if p:
+            parts.add(p)
+    return parts
+
+
+def _report_total_qty(report_data: dict | None) -> float:
+    total = 0.0
+    if not report_data or not isinstance(report_data, dict):
+        return total
+    for item in report_data.get("items", []):
+        if str(item.get("po_forecast") or "").strip().lower() == "internal forecast":
+            continue
+        try:
+            total += float(item.get("open_qty", item.get("quantity", 0)) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _overlap_pct(a: set[str], b: set[str]) -> float:
+    """Fraction of the SMALLER set's parts that are shared — intuitive 'match %'."""
+    if not a or not b:
+        return 0.0
+    shared = len(a & b)
+    return shared / min(len(a), len(b))
+
+
+def _filename_sim(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 router = APIRouter(prefix="/demand", tags=["Demand Management"])
 
@@ -34,19 +81,33 @@ async def get_demand_stats(
     zso_count_result = await db.execute(select(func.count(ZSOReport.id)))
     zso_count = zso_count_result.scalar() or 0
 
-    # Count ZSO total line items
-    zso_reports = await db.execute(select(ZSOReport.report_data))
-    total_line_items = 0
-    for (rd,) in zso_reports.all():
-        if rd and isinstance(rd, dict):
-            total_line_items += len(rd.get("items", []))
-
-    # Count demand uploads by type
-    upload_counts = await db.execute(
-        select(DemandUpload.upload_type, func.count(DemandUpload.id))
-        .group_by(DemandUpload.upload_type)
+    # Count ZSO total line items + unmatched parts (no Maini Part #) from LATEST ZSO only
+    # Latest ZSO is the most actionable — unmatched parts there need immediate attention
+    zso_reports_result = await db.execute(
+        select(ZSOReport.report_data).order_by(ZSOReport.created_at.desc())
     )
-    upload_map = {row[0]: row[1] for row in upload_counts.all()}
+    all_report_data = zso_reports_result.all()
+
+    total_line_items = 0
+    unmatched_parts: set[str] = set()   # distinct cust_part_no with no maini_part_no
+
+    for (rd,) in all_report_data:
+        if not rd or not isinstance(rd, dict):
+            continue
+        items = rd.get("items", [])
+        total_line_items += len(items)
+
+    # Unmatched = from LATEST report only (most current picture)
+    if all_report_data:
+        latest_rd = all_report_data[0][0]
+        if latest_rd and isinstance(latest_rd, dict):
+            for item in latest_rd.get("items", []):
+                cust_part = (item.get("cust_part_no") or "").strip()
+                maini_part = (item.get("maini_part_no") or "").strip()
+                po_forecast = (item.get("po_forecast") or "").strip().lower()
+                # Skip Internal Forecast rows — they don't need master data matching
+                if cust_part and not maini_part and po_forecast != "internal forecast":
+                    unmatched_parts.add(cust_part)
 
     return {
         "sources": {
@@ -58,12 +119,7 @@ async def get_demand_stats(
         },
         "zso_reports": zso_count,
         "total_line_items": total_line_items,
-        "uploads": {
-            "vmi": upload_map.get("vmi", 0),
-            "safety_stock": upload_map.get("safety_stock", 0),
-            "sap": upload_map.get("sap", 0),
-            "manual": upload_map.get("manual", 0),
-        },
+        "unmatched_parts": len(unmatched_parts),
     }
 
 
@@ -114,18 +170,28 @@ async def compare_demand(
             prev = prev_items[key]
             prev_qty = float(prev.get("open_qty", prev.get("quantity", 0)) or 0)
             diff = curr_qty - prev_qty
+            # Abrupt = relative swing beyond threshold → needs customer follow-up
+            rel = abs(diff) / (prev_qty if prev_qty else 1.0)
+            abrupt = rel > ABRUPT_CHANGE_THRESHOLD
             if diff > 0:
-                increases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
+                increases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "abrupt": abrupt, "change_type": "increase", "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
             elif diff < 0:
-                decreases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
+                decreases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "abrupt": abrupt, "change_type": "decrease", "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
         else:
-            new_items.append({"part": part, "customer": curr.get("customer_name", ""), "qty": curr_qty, "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
+            # A brand-new line is inherently an abrupt addition worth confirming
+            new_items.append({"part": part, "customer": curr.get("customer_name", ""), "qty": curr_qty, "abrupt": True, "change_type": "new", "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
 
     for key, prev in prev_items.items():
         if key and key not in curr_items:
             prev_qty = float(prev.get("open_qty", prev.get("quantity", 0)) or 0)
             part = prev.get("cust_part_no", prev.get("customer_part_no", key))
-            removed_items.append({"part": part, "customer": prev.get("customer_name", ""), "qty": prev_qty, "po": prev.get("po_forecast", ""), "ship_date": prev.get("ship_date", ""), "row_id": key})
+            removed_items.append({"part": part, "customer": prev.get("customer_name", ""), "qty": prev_qty, "abrupt": True, "change_type": "removed", "po": prev.get("po_forecast", ""), "ship_date": prev.get("ship_date", ""), "row_id": key})
+
+    abrupt_count = (
+        sum(1 for x in increases if x["abrupt"])
+        + sum(1 for x in decreases if x["abrupt"])
+        + len(new_items) + len(removed_items)
+    )
 
     return {
         "increases": increases,
@@ -137,8 +203,128 @@ async def compare_demand(
             "total_decreases": len(decreases),
             "total_new": len(new_items),
             "total_removed": len(removed_items),
+            "abrupt_changes": abrupt_count,
         },
     }
+
+
+# ── Demand follow-ups: audit trail for abrupt changes ───────────────────────
+
+class FollowUpCreate(BaseModel):
+    current_report_id: int
+    previous_report_id: int
+    row_id: str | None = None
+    part: str | None = None
+    customer: str | None = None
+    change_type: str | None = None
+    prev_qty: float | None = None
+    curr_qty: float | None = None
+    note: str | None = None
+
+
+class FollowUpUpdate(BaseModel):
+    note: str | None = None
+    status: str | None = None   # open / done
+
+
+def _followup_dict(f: DemandFollowUp) -> dict:
+    return {
+        "id": f.id,
+        "current_report_id": f.current_report_id,
+        "previous_report_id": f.previous_report_id,
+        "row_id": f.row_id,
+        "part": f.part,
+        "customer": f.customer,
+        "change_type": f.change_type,
+        "prev_qty": f.prev_qty,
+        "curr_qty": f.curr_qty,
+        "note": f.note,
+        "status": f.status,
+        "created_by": f.created_by,
+        "created_at": f.created_at.isoformat() if f.created_at else None,
+        "updated_at": f.updated_at.isoformat() if f.updated_at else None,
+    }
+
+
+@router.get("/followups")
+async def list_followups(
+    current_report_id: int = Query(...),
+    previous_report_id: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """All follow-ups logged for a given comparison pair."""
+    result = await db.execute(
+        select(DemandFollowUp)
+        .where(
+            DemandFollowUp.current_report_id == current_report_id,
+            DemandFollowUp.previous_report_id == previous_report_id,
+        )
+        .order_by(DemandFollowUp.created_at.desc())
+    )
+    return [_followup_dict(f) for f in result.scalars().all()]
+
+
+@router.post("/followups", status_code=201)
+async def create_followup(
+    payload: FollowUpCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    f = DemandFollowUp(
+        current_report_id=payload.current_report_id,
+        previous_report_id=payload.previous_report_id,
+        row_id=payload.row_id,
+        part=payload.part,
+        customer=payload.customer,
+        change_type=payload.change_type,
+        prev_qty=payload.prev_qty,
+        curr_qty=payload.curr_qty,
+        note=payload.note,
+        status="open",
+        created_by=current_user.id,
+    )
+    db.add(f)
+    await db.flush()
+    await db.refresh(f)
+    return _followup_dict(f)
+
+
+@router.patch("/followups/{followup_id}")
+async def update_followup(
+    followup_id: int,
+    payload: FollowUpUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(DemandFollowUp).where(DemandFollowUp.id == followup_id))
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="Follow-up not found")
+    if payload.note is not None:
+        f.note = payload.note
+    if payload.status is not None:
+        if payload.status not in ("open", "done"):
+            raise HTTPException(status_code=400, detail="status must be 'open' or 'done'")
+        f.status = payload.status
+    await db.flush()
+    await db.refresh(f)
+    return _followup_dict(f)
+
+
+@router.delete("/followups/{followup_id}")
+async def delete_followup(
+    followup_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(DemandFollowUp).where(DemandFollowUp.id == followup_id))
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="Follow-up not found")
+    await db.delete(f)
+    await db.flush()
+    return {"detail": "Follow-up deleted"}
 
 
 @router.post("/upload")
@@ -236,6 +422,132 @@ async def list_zso_reports_for_comparison(
             "po_numbers": po_numbers[:3],    # up to 3 PO numbers for context
         })
     return reports
+
+
+def _assign_versions(group: list[dict]) -> dict[int, str]:
+    """Assign version labels (v1, v2, v2.1 …) to a comparable group of reports.
+
+    Ordered by created_at ascending. Each step: if total-qty change vs the
+    previous version is < MINOR_CHANGE_THRESHOLD it's a minor bump (v2 → v2.1),
+    otherwise a major bump (v2 → v3).
+    """
+    ordered = sorted(group, key=lambda r: r["created_at"] or "")
+    labels: dict[int, str] = {}
+    major, minor = 1, 0
+    prev_qty = None
+    for i, r in enumerate(ordered):
+        qty = r["_total_qty"]
+        if i == 0:
+            major, minor = 1, 0
+        else:
+            base = prev_qty if prev_qty else 1.0
+            rel_change = abs(qty - (prev_qty or 0)) / base if base else 1.0
+            if rel_change < MINOR_CHANGE_THRESHOLD:
+                minor += 1
+            else:
+                major += 1
+                minor = 0
+        labels[r["id"]] = f"v{major}" if minor == 0 else f"v{major}.{minor}"
+        prev_qty = qty
+    return labels
+
+
+@router.get("/comparable/{report_id}")
+async def comparable_reports(
+    report_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return reports comparable to the given one, ranked by part-number overlap.
+
+    Matching is based on shared customer part numbers (works even when the
+    customer NAME is blank/inconsistent), boosted by source-filename similarity.
+    Each comparable report carries a version label within the matched group.
+    """
+    # Load all candidate reports (id, created_at, report_data, email_id)
+    result = await db.execute(
+        select(ZSOReport.id, ZSOReport.created_at, ZSOReport.report_data, ZSOReport.email_id)
+        .order_by(ZSOReport.created_at.desc())
+        .limit(100)
+    )
+    rows = result.all()
+
+    # Source filename per report (first attachment of its email)
+    email_ids = [r[3] for r in rows if r[3]]
+    filename_by_email: dict[int, str] = {}
+    if email_ids:
+        em_result = await db.execute(
+            select(Email).where(Email.id.in_(email_ids))
+        )
+        for em in em_result.scalars().all():
+            atts = em.attachments or []
+            if atts:
+                filename_by_email[em.id] = atts[0].filename or ""
+
+    # Build a record per report
+    records: dict[int, dict] = {}
+    for rid, created_at, report_data, email_id in rows:
+        records[rid] = {
+            "id": rid,
+            "created_at": created_at.isoformat() if created_at else None,
+            "_parts": _report_part_set(report_data),
+            "_total_qty": _report_total_qty(report_data),
+            "_filename": filename_by_email.get(email_id, ""),
+            "_customers": sorted({
+                str(it.get("customer_name") or "").strip()
+                for it in (report_data or {}).get("items", [])
+                if str(it.get("customer_name") or "").strip()
+            }) if isinstance(report_data, dict) else [],
+            "_item_count": len((report_data or {}).get("items", [])) if isinstance(report_data, dict) else 0,
+        }
+
+    target = records.get(report_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    # Score every other report against the target
+    comparables = []
+    for rid, rec in records.items():
+        if rid == report_id:
+            continue
+        overlap = _overlap_pct(target["_parts"], rec["_parts"])
+        if overlap < OVERLAP_THRESHOLD:
+            continue
+        fname_sim = _filename_sim(target["_filename"], rec["_filename"])
+        score = round(overlap * 0.8 + fname_sim * 0.2, 4)
+        shared = len(target["_parts"] & rec["_parts"])
+        comparables.append({
+            **rec,
+            "overlap_pct": round(overlap * 100),
+            "filename_sim": round(fname_sim * 100),
+            "score": score,
+            "shared_parts": shared,
+            "is_older": (rec["created_at"] or "") < (target["created_at"] or ""),
+        })
+
+    # Version labels across the matched group (target + comparables)
+    group = [target] + comparables
+    labels = _assign_versions(group)
+
+    def _public(rec: dict) -> dict:
+        return {
+            "id": rec["id"],
+            "created_at": rec["created_at"],
+            "version": labels.get(rec["id"], "v1"),
+            "customers": rec.get("_customers", []),
+            "item_count": rec.get("_item_count", 0),
+            "filename": rec.get("_filename", ""),
+            "overlap_pct": rec.get("overlap_pct"),
+            "filename_sim": rec.get("filename_sim"),
+            "shared_parts": rec.get("shared_parts"),
+            "is_older": rec.get("is_older"),
+        }
+
+    comparables.sort(key=lambda r: r["score"], reverse=True)
+    return {
+        "target": _public(target),
+        "comparables": [_public(c) for c in comparables],
+    }
 
 
 # ── Demand Uploads: list & delete ──────────────────────────────────────────

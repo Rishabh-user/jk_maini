@@ -21,11 +21,18 @@ async def list_emails(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=500),
     status: EmailStatus | None = None,
+    include_manual: bool = Query(False, description="Include manual uploads (default: excluded)"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     query = select(Email)
     count_query = select(func.count(Email.id))
+
+    if not include_manual:
+        # Exclude manual uploads — they appear in Upload Document page, not Email Inbox
+        is_real_email = ~Email.gmail_message_id.like("manual-upload-%")
+        query = query.where(is_real_email)
+        count_query = count_query.where(is_real_email)
 
     if status:
         query = query.where(Email.status == status)

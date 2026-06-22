@@ -4,6 +4,9 @@ import { fetchMasterData, createMasterData, updateMasterData, deleteMasterData, 
 
 const emptyForm = { customer_name: '', customer_location: '', customer_part_no: '', maini_part_no: '', description: '', country: '', unit_price: '', currency: 'INR', hsn_code: '' }
 const emptyForexForm = { currency_from: 'USD', currency_to: 'INR', rate: '', effective_date: '', notes: '' }
+// Supported source currencies for conversion to INR
+const FOREX_FROM_CURRENCIES = ['USD', 'EUR', 'GBP']
+const FOREX_TO_CURRENCIES = ['INR']
 
 export default function MasterData() {
   const [data, setData] = useState([])
@@ -99,6 +102,29 @@ export default function MasterData() {
   const [showForexForm, setShowForexForm] = useState(false)
   const [forexForm, setForexForm] = useState(emptyForexForm)
   const [forexSaving, setForexSaving] = useState(false)
+  // Currencies added by the user at runtime via the free-text box (e.g. AED, SGD)
+  const [extraCurrencies, setExtraCurrencies] = useState([])
+  const [newCurrency, setNewCurrency] = useState('')
+
+  // Dropdown options = built-in list + user-added + any currency already saved in rates.
+  // So a currency you add (or have ever saved a rate for) shows up in the dropdown.
+  const fromOptions = Array.from(new Set([
+    ...FOREX_FROM_CURRENCIES, ...extraCurrencies,
+    ...forexRates.map((r) => r.currency_from).filter(Boolean),
+  ]))
+  const toOptions = Array.from(new Set([
+    ...FOREX_TO_CURRENCIES, ...extraCurrencies,
+    ...forexRates.map((r) => r.currency_to).filter(Boolean),
+  ]))
+
+  const handleAddCurrency = () => {
+    const code = newCurrency.trim().toUpperCase()
+    if (!code) return
+    if (!extraCurrencies.includes(code)) setExtraCurrencies([...extraCurrencies, code])
+    // Select the newly added currency as the "From" by default
+    setForexForm({ ...forexForm, currency_from: code })
+    setNewCurrency('')
+  }
 
   const loadForexRates = useCallback(async () => {
     setForexLoading(true)
@@ -329,7 +355,7 @@ export default function MasterData() {
               {['Customer Name', 'Location', 'Customer Part #', 'Maini Part #', 'Description', 'Country', 'Actions'].map(
                 (h) => (
                   <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 whitespace-nowrap">
-                    {h} {h !== 'Actions' && <span className="text-gray-400">&#8597;</span>}
+                    {h}
                   </th>
                 )
               )}
@@ -395,20 +421,40 @@ export default function MasterData() {
                 <RefreshCw size={14} className={forexLoading ? 'animate-spin text-blue-500' : 'text-gray-400'} />
               </button>
             </div>
+            {/* Free-text: add any currency code not in the dropdowns (e.g. AED for Dubai Dirham).
+                Once added it appears in the dropdowns below; it persists after you save a rate with it. */}
+            <div className="mb-3 flex items-end gap-2">
+              <div className="flex-1 max-w-xs">
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Add a currency not listed (type a code, e.g. AED, SGD, JPY)
+                </label>
+                <input value={newCurrency}
+                  onChange={(e) => setNewCurrency(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddCurrency() } }}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg uppercase focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  placeholder="e.g. AED" />
+              </div>
+              <button type="button" onClick={handleAddCurrency} disabled={!newCurrency.trim()}
+                className="px-3 py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50">
+                Add to list
+              </button>
+            </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 items-end">
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">From Currency</label>
-                <input value={forexForm.currency_from}
+                <select value={forexForm.currency_from}
                   onChange={(e) => setForexForm({ ...forexForm, currency_from: e.target.value })}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:outline-none"
-                  placeholder="USD" />
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-emerald-500 focus:outline-none">
+                  {fromOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">To Currency</label>
-                <input value={forexForm.currency_to}
+                <select value={forexForm.currency_to}
                   onChange={(e) => setForexForm({ ...forexForm, currency_to: e.target.value })}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:outline-none"
-                  placeholder="INR" />
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-emerald-500 focus:outline-none">
+                  {toOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Rate (1 USD = ? INR)</label>

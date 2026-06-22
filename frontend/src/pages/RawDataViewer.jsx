@@ -39,6 +39,8 @@ export default function RawDataViewer() {
   const [attachments, setAttachments] = useState([])
   const [selectedAtt, setSelectedAtt] = useState(null)
   const [rawEntries, setRawEntries] = useState([])
+  const [bodyText, setBodyText] = useState('')
+  const [instructions, setInstructions] = useState([])
   const [rowCounts, setRowCounts] = useState({})
   const [fileSearch, setFileSearch] = useState('')
   const [tableSearch, setTableSearch] = useState('')
@@ -50,7 +52,7 @@ export default function RawDataViewer() {
   useEffect(() => {
     async function load() {
       try {
-        const emailsRes = await fetchEmails(0, 200)
+        const emailsRes = await fetchEmails(0, 500, undefined, true)
         const emails = emailsRes.data.emails || []
         const atts = []
 
@@ -96,18 +98,27 @@ export default function RawDataViewer() {
       .then((res) => {
         const entries = res.data || []
         const allRows = []
+        const texts = []
+        const allInstructions = []
         for (const entry of entries) {
           const extracted = entry.extracted_data || {}
           for (const row of extracted.rows || []) {
             allRows.push({ ...row, _source: entry.source_type || 'unknown' })
           }
+          const t = extracted.body_text || extracted.raw_text
+          if (t) texts.push(t)
+          for (const ins of extracted.instructions || []) allInstructions.push(ins)
         }
         setRawEntries(allRows)
+        setBodyText(texts.join('\n\n──────────\n\n'))
+        setInstructions(allInstructions)
         setRowCounts((prev) => ({ ...prev, [selectedAtt.id]: allRows.length }))
       })
       .catch((err) => {
         console.error('Failed to load raw data:', err)
         setRawEntries([])
+        setBodyText('')
+        setInstructions([])
         setRowCounts((prev) => ({ ...prev, [selectedAtt.id]: 0 }))
       })
       .finally(() => setLoadingData(false))
@@ -349,6 +360,35 @@ export default function RawDataViewer() {
               <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
             </div>
           ) : (
+            <>
+            {/* Sender instructions detected in the body (e.g. "discard PO X") */}
+            {instructions.length > 0 && (
+              <div className="mb-4 bg-amber-50 border border-amber-200 rounded-lg p-4">
+                <p className="text-sm font-semibold text-amber-800 mb-2">
+                  Instructions detected in this message ({instructions.length})
+                </p>
+                <ul className="space-y-1">
+                  {instructions.map((ins, i) => (
+                    <li key={i} className="text-sm text-amber-900 flex gap-2">
+                      <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-xs font-medium whitespace-nowrap">
+                        {ins.type}{ins.target ? `: ${ins.target}` : ''}
+                      </span>
+                      <span>{ins.detail}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* When there are no structured rows, show the captured body text */}
+            {rawEntries.length === 0 && bodyText ? (
+              <div className="bg-white rounded-lg border border-gray-200 p-4">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                  Extracted Body Text (no line-item table in this message)
+                </p>
+                <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">{bodyText}</pre>
+              </div>
+            ) : (
             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full min-w-max">
@@ -412,6 +452,8 @@ export default function RawDataViewer() {
                 </div>
               )}
             </div>
+            )}
+            </>
           )}
         </section>
       </div>

@@ -12,6 +12,7 @@ from app.models.email import Email, EmailStatus, Attachment
 from app.models.data import RawData
 from app.services.file_parser import FileParser
 from app.services.ai_mapping import map_columns_with_ai
+from app.services.email_processor import apply_ai_fallback
 from app.utils.config import get_settings
 from app.utils.security import get_current_user, require_roles
 from app.utils.logging import logger
@@ -143,6 +144,12 @@ def _build_mapped_rows(
             # represents a demand quantity for that week/month.
             # Handles: ISO dates ("2026-10-26"), month-year ("Aug. 2025", "Sep 2025").
             src_str = str(src_col).strip()
+            # Delivery-schedule / forecast files carry a "Type" column (PO vs Fcst)
+            # that distinguishes firm purchase orders from forecast demand. Preserve
+            # it so the ZSO builder can label each line correctly.
+            if src_str.lower() == "type" and str(value).strip():
+                mapped_row.setdefault("_demand_type", str(value).strip())
+                continue
             if _DATE_COL_RE.match(src_str) or _MONTH_COL_RE.match(src_str):
                 try:
                     qty = float(str(value).replace(",", "").strip())
@@ -204,8 +211,8 @@ def _build_mapped_rows(
 
 ALLOWED_EXTENSIONS = {
     "pdf", "xlsx", "xls", "csv", "slk",
-    "png", "jpg", "jpeg", "tiff", "bmp",
-    "msg", "eml",
+    "png", "jpg", "jpeg", "tiff", "bmp", "gif", "webp",
+    "msg", "eml", "html", "htm",
 }
 
 
@@ -214,8 +221,9 @@ def _get_source_type(filename: str) -> str:
     type_map = {
         "pdf": "pdf", "xlsx": "excel", "xls": "excel", "csv": "csv", "slk": "excel",
         "png": "image", "jpg": "image", "jpeg": "image",
-        "tiff": "image", "bmp": "image",
+        "tiff": "image", "bmp": "image", "gif": "image", "webp": "image",
         "msg": "email_msg", "eml": "email_eml",
+        "html": "email_body", "htm": "email_body",
     }
     return type_map.get(ext, "unknown")
 
@@ -230,6 +238,14 @@ async def upload_document(
     """Upload a document manually (PDF, Excel, CSV, Image) and optionally process it."""
     filename = file.filename or "unknown"
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    # Reject Microsoft Office temp/lock files (e.g. "~$Report.xlsx") — they hold no
+    # data and would just produce a confusing 0-row result.
+    if os.path.basename(filename).startswith("~$"):
+        raise HTTPException(
+            status_code=400,
+            detail="This is a temporary Office lock file (~$…), not a real document. Upload the actual file.",
+        )
 
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -285,6 +301,7 @@ async def upload_document(
     if process:
         try:
             extracted = FileParser.parse(file_path, file.content_type)
+            extracted = await apply_ai_fallback(extracted, filename=filename, file_path=file_path)
             columns = extracted.get("columns", [])
             file_metadata = extracted.get("file_metadata", {})
 
@@ -359,6 +376,9 @@ async def process_upload(
     try:
         for attachment in attachments:
             extracted = FileParser.parse(attachment.file_path, attachment.content_type)
+            extracted = await apply_ai_fallback(
+                extracted, filename=attachment.filename, file_path=attachment.file_path
+            )
             columns = extracted.get("columns", [])
             file_metadata = extracted.get("file_metadata", {})
 

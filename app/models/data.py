@@ -60,6 +60,33 @@ class ZSOReport(Base):
     created_by_user: Mapped["User"] = relationship(back_populates="zso_reports")
 
 
+class DemandFollowUp(Base):
+    """Audit trail for abrupt demand changes flagged during version comparison.
+
+    When a part's quantity changes sharply between two report versions, the KAS
+    logs a follow-up (e.g. "confirmed with customer") here. Provides the audit
+    trail required by the MoM versioning point.
+    """
+    __tablename__ = "demand_followups"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    current_report_id: Mapped[int] = mapped_column(Integer, index=True)
+    previous_report_id: Mapped[int] = mapped_column(Integer, index=True)
+    row_id: Mapped[str | None] = mapped_column(String(255), index=True)   # the changed line row_id
+    part: Mapped[str | None] = mapped_column(String(255))
+    customer: Mapped[str | None] = mapped_column(String(255))
+    change_type: Mapped[str | None] = mapped_column(String(50))           # increase/decrease/new/removed
+    prev_qty: Mapped[float | None] = mapped_column(Float)
+    curr_qty: Mapped[float | None] = mapped_column(Float)
+    note: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="open")       # open / done
+    created_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ForecastEntry(Base):
     """Internal forecast data uploaded by Maini (e.g. Safran HAL Maini Forecast).
 

@@ -257,7 +257,7 @@ export default function ZSOReports() {
 
   const loadReports = useCallback(async () => {
     try {
-      const [rr, er] = await Promise.allSettled([fetchZSOReports(), fetchEmails(0, 500)])
+      const [rr, er] = await Promise.allSettled([fetchZSOReports(), fetchEmails(0, 500, undefined, true)])
       if (rr.status === 'fulfilled') setReports(rr.value.data || [])
       if (er.status === 'fulfilled') setEmailIndex(buildEmailIndex(er.value.data?.emails || []))
     } catch (e) { console.error(e) }
@@ -460,7 +460,8 @@ export default function ZSOReports() {
     setLoadingEmails(true)
     setSelectedEmailId(null)
     try {
-      const res = await fetchEmails(0, 100, 'processed')
+      // include_manual=true → manual uploads are valid ZSO sources too
+      const res = await fetchEmails(0, 200, 'processed', true)
       setProcessedEmails(res.data?.emails || [])
     } catch (e) { console.error(e) }
     finally { setLoadingEmails(false) }

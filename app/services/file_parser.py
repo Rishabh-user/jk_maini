@@ -138,6 +138,8 @@ class FileParser:
             return FileParser.parse_text(file_path)
         if ext in (".png", ".jpg", ".jpeg", ".tiff", ".bmp"):
             return FileParser.parse_image(file_path)
+        if ext in (".html", ".htm"):
+            return FileParser.parse_html(file_path)
         if ext == ".slk":
             return FileParser.parse_slk(file_path)
         if ext == ".msg":
@@ -446,20 +448,37 @@ class FileParser:
         sender = str(msg.sender or "")
         subject = str(msg.subject or "")
         body = str(msg.body or "")
+        html_body = msg.htmlBody
+        if isinstance(html_body, bytes):
+            html_body = html_body.decode("utf-8", errors="replace")
+        html_body = html_body or ""
         logger.info(f"MSG: subject='{subject}' sender='{sender}' attachments={len(msg.attachments)}")
 
-        # Build (filename, bytes) list for all attachments
+        # Split attachments into parseable files vs inline images
         attachment_data: list[tuple[str, bytes]] = []
+        inline_images: list[tuple[str, str]] = []   # (media_type, base64)
         for att in msg.attachments:
             fname = att.longFilename or att.shortFilename or ""
             try:
                 data = att.data
-                if data:
-                    attachment_data.append((fname, data))
             except Exception as e:
                 logger.warning(f"Could not read MSG attachment '{fname}': {e}")
+                continue
+            if not data:
+                continue
+            img = FileParser._as_inline_image(fname, data)
+            if img:
+                inline_images.append(img)
+            else:
+                attachment_data.append((fname, data))
 
         result = FileParser._parse_email_attachments(attachment_data)
+
+        # No usable spreadsheet/PDF attachment → try the HTML body's tables
+        if not result.get("rows") and html_body.strip():
+            html_result = FileParser.parse_html_string(html_body)
+            if html_result.get("rows"):
+                result = html_result
 
         # Inject customer name from sender if not already set by attachment parsers
         sender_name = FileParser._extract_email_sender_name(sender)
@@ -469,10 +488,19 @@ class FileParser:
                 result["file_metadata"]["customer_name"] = sender_name
                 logger.info(f"MSG customer name from sender: '{sender_name}'")
 
-        # Fallback: if no attachments had rows, surface the email body as raw text
-        if not result.get("rows") and body.strip():
-            result["raw_text"] = body.strip()
+        # Always surface the email body so the processor can save it + scan for
+        # instructions, regardless of whether an attachment table was found.
+        if body.strip():
+            result["_body_text"] = body.strip()
+        if html_body.strip():
+            result["_body_html"] = html_body
+        if not result.get("rows"):
+            result.setdefault("raw_text", body.strip())
+            if html_body.strip():
+                result.setdefault("raw_html", html_body)
             result["_source"] = "email_body"
+        if inline_images:
+            result["_inline_images"] = inline_images
 
         result["_email_subject"] = subject
         result["_email_sender"] = sender
@@ -497,23 +525,40 @@ class FileParser:
         subject = msg.get("subject", "")
         logger.info(f"EML: subject='{subject}' sender='{sender}'")
 
-        # Collect attachments
+        # Collect attachments, inline images, and body text/html
         attachment_data: list[tuple[str, bytes]] = []
+        inline_images: list[tuple[str, str]] = []
         body_text = ""
+        body_html = ""
         for part in msg.walk():
             content_type = part.get_content_type()
             filename = part.get_filename()
+            payload = part.get_payload(decode=True)
+            if payload is None:
+                continue
 
             if filename:
-                payload = part.get_payload(decode=True)
-                if payload:
+                img = FileParser._as_inline_image(filename, payload, content_type)
+                if img:
+                    inline_images.append(img)
+                else:
                     attachment_data.append((filename, payload))
-            elif content_type == "text/plain" and not filename:
-                payload = part.get_payload(decode=True)
-                if payload:
-                    body_text += payload.decode(errors="replace")
+            elif content_type == "text/plain":
+                body_text += payload.decode(errors="replace")
+            elif content_type == "text/html":
+                body_html += payload.decode(errors="replace")
+            elif content_type.startswith("image/"):
+                img = FileParser._as_inline_image(filename or "inline", payload, content_type)
+                if img:
+                    inline_images.append(img)
 
         result = FileParser._parse_email_attachments(attachment_data)
+
+        # No usable attachment → try the HTML body's tables
+        if not result.get("rows") and body_html.strip():
+            html_result = FileParser.parse_html_string(body_html)
+            if html_result.get("rows"):
+                result = html_result
 
         # Inject customer name from sender if not already set
         sender_name = FileParser._extract_email_sender_name(sender)
@@ -523,14 +568,49 @@ class FileParser:
                 result["file_metadata"]["customer_name"] = sender_name
                 logger.info(f"EML customer name from sender: '{sender_name}'")
 
-        # Fallback: surface email body if no usable attachments
-        if not result.get("rows") and body_text.strip():
-            result["raw_text"] = body_text.strip()
+        # Always surface the email body so the processor can save it + scan for
+        # instructions, regardless of whether an attachment table was found.
+        if body_text.strip():
+            result["_body_text"] = body_text.strip()
+        if body_html.strip():
+            result["_body_html"] = body_html
+        if not result.get("rows"):
+            result.setdefault("raw_text", body_text.strip())
+            if body_html.strip():
+                result.setdefault("raw_html", body_html)
             result["_source"] = "email_body"
+        if inline_images:
+            result["_inline_images"] = inline_images
 
         result["_email_subject"] = subject
         result["_email_sender"] = sender
         return result
+
+    @staticmethod
+    def _as_inline_image(filename: str, data: bytes, content_type: str | None = None) -> tuple[str, str] | None:
+        """If (filename, data) is an image, return (media_type, base64) else None."""
+        import base64 as _b64
+        ext = (filename.rsplit(".", 1)[-1].lower() if "." in (filename or "") else "")
+        img_exts = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                    "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp", "tiff": "image/tiff"}
+        media = None
+        if content_type and content_type.startswith("image/"):
+            media = content_type
+        elif ext in img_exts:
+            media = img_exts[ext]
+        if not media:
+            return None
+        # Claude vision supports png/jpeg/gif/webp; coerce others to png
+        if media not in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+            try:
+                im = Image.open(io.BytesIO(data)).convert("RGB")
+                buf = io.BytesIO()
+                im.save(buf, format="PNG")
+                data = buf.getvalue()
+                media = "image/png"
+            except Exception:
+                return None
+        return (media, _b64.b64encode(data).decode("ascii"))
 
     @staticmethod
     def _extract_pdf_metadata(text: str) -> dict:
@@ -881,6 +961,7 @@ class FileParser:
         result: dict = {
             "columns": primary["columns"],
             "rows": primary["rows"],
+            "raw_text": full_text.strip(),   # kept for AI fallback on mis-parsed tables
             "tables": selected_tables,
             "selected_table_ids": [t["table_id"] for t in selected_tables],
             "primary_table_id": primary["table_id"],
@@ -2385,6 +2466,81 @@ class FileParser:
         lines = [line.strip() for line in text.split("\n") if line.strip()]
         rows = [{"ocr_text": line} for line in lines]
         return {"columns": ["ocr_text"] if rows else [], "rows": rows, "raw_text": text}
+
+    @staticmethod
+    def parse_html(file_path: str) -> dict:
+        """Parse an HTML document (e.g. an email body) — extract embedded tables.
+
+        Picks the richest <table> and converts it to rows. Always returns the
+        stripped visible text and the raw HTML so the caller can fall back to
+        AI extraction when no usable table is found (the common case for
+        prose-with-one-small-table emails).
+        """
+        with open(file_path, encoding="utf-8", errors="replace") as f:
+            html = f.read()
+        return FileParser.parse_html_string(html)
+
+    @staticmethod
+    def parse_html_string(html: str) -> dict:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html or "", "html.parser")
+        # Visible text (collapse whitespace), used for AI fallback + metadata
+        text = re.sub(r"\n{3,}", "\n\n", soup.get_text("\n", strip=True))
+
+        # Outlook/HTML emails are full of nested LAYOUT and SIGNATURE tables that
+        # can have more rows than the real demand table. So pick the table that
+        # most looks like demand data (scored by demand-like headers + numeric
+        # cells), NOT the one with the most rows.
+        best_rows: list[dict] = []
+        best_score = float("-inf")
+        for table in soup.find_all("table"):
+            trs = table.find_all("tr")
+            if len(trs) < 2:
+                continue
+            # Use only this table's OWN rows, not those of nested child tables
+            own_trs = [tr for tr in trs if tr.find_parent("table") is table]
+            if len(own_trs) < 2:
+                continue
+            grid = []
+            for tr in own_trs:
+                cells = [c for c in tr.find_all(["td", "th"]) if c.find_parent("table") is table]
+                grid.append([re.sub(r"\s+", " ", c.get_text(" ", strip=True)) for c in cells])
+            header = grid[0]
+            if not any(header):
+                continue
+            headers = FileParser._unique_headers([h or f"Column{i+1}" for i, h in enumerate(header)])
+            rows = []
+            for r in grid[1:]:
+                if not any(r):
+                    continue
+                row = {headers[i]: (r[i] if i < len(r) else "") for i in range(len(headers))}
+                rows.append(row)
+            if not rows:
+                continue
+            score = FileParser._score_rows(rows)
+            if score > best_score:
+                best_score = score
+                best_rows = rows
+
+        # Require a positive demand signal — otherwise it's a layout/signature
+        # table and we'd rather hand the body text to AI / show it as text.
+        if best_rows and best_score >= 1.0:
+            return {
+                "columns": list(best_rows[0].keys()),
+                "rows": best_rows,
+                "raw_text": text,
+                "raw_html": html,
+                "_debug": {"selected_strategy": "html_table", "row_count": len(best_rows), "score": round(best_score, 2)},
+            }
+        # No usable table — surface text + html for AI fallback
+        return {
+            "columns": [],
+            "rows": [],
+            "raw_text": text,
+            "raw_html": html,
+            "_debug": {"selected_strategy": "html_no_table", "row_count": 0},
+        }
 
     @staticmethod
     def _sanitize_rows(rows: list[dict]) -> list[dict]:

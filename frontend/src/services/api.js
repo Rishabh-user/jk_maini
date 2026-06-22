@@ -48,9 +48,10 @@ export const fetchDashboardStats = () => api.get('/dashboard/stats')
 export const fetchRecentActivity = () => api.get('/dashboard/recent-activity')
 
 // ─── Emails ──────────────────────────────────
-export const fetchEmails = (skip = 0, limit = 50, status) => {
+export const fetchEmails = (skip = 0, limit = 50, status, includeManual = false) => {
   const params = { skip, limit }
   if (status) params.status = status
+  if (includeManual) params.include_manual = true
   return api.get('/emails/', { params })
 }
 export const fetchEmailById = (id) => api.get(`/emails/${id}`)
@@ -106,6 +107,12 @@ export const uploadDemandFile = (file, uploadType) => {
   })
 }
 export const fetchDemandReports = () => api.get('/demand/reports')
+export const fetchComparableReports = (reportId) => api.get(`/demand/comparable/${reportId}`)
+export const fetchFollowups = (currentId, previousId) =>
+  api.get('/demand/followups', { params: { current_report_id: currentId, previous_report_id: previousId } })
+export const createFollowup = (payload) => api.post('/demand/followups', payload)
+export const updateFollowup = (id, payload) => api.patch(`/demand/followups/${id}`, payload)
+export const deleteFollowup = (id) => api.delete(`/demand/followups/${id}`)
 export const fetchDemandUploads = (type) => api.get('/demand/uploads', { params: type ? { upload_type: type } : {} })
 export const previewDemandUpload = (id) => api.get(`/demand/uploads/${id}/preview`)
 export const deleteDemandUpload = (id) => api.delete(`/demand/uploads/${id}`)

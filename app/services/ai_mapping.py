@@ -1,4 +1,5 @@
 import json
+import re
 
 import anthropic
 
@@ -45,6 +46,8 @@ EXACT_COLUMN_MAP = {
     "p.n.": "Customer Part #",
     "pn": "Customer Part #",
     # Component / Comp — Safran HAL, aerospace files
+    "rm specification": "Customer Part #",   # Sigma Aero RFQ — raw-material spec = part #
+    "rm spec": "Customer Part #",
     "comp part": "Customer Part #",
     "comp part no": "Customer Part #",
     "comp part number": "Customer Part #",
@@ -91,6 +94,8 @@ EXACT_COLUMN_MAP = {
     "description": "Description",
     "discription": "Description",
     "material description": "Description",
+    "rm specification description": "Description",   # Sigma Aero RFQ
+    "rm spec description": "Description",
     "item description": "Description",
     "item spec": "Description",
     "part description": "Description",       # Parker portal
@@ -106,6 +111,8 @@ EXACT_COLUMN_MAP = {
     "initial qty": "Quantity",
     "quantity": "Quantity",
     "qty": "Quantity",
+    "q'ty": "Quantity",          # Sigma Aero RFQ / common Asian-supplier header
+    "qty.": "Quantity",
     "rem. qty": "Quantity",
     "remaining qty": "Quantity",
     "remaining quantity": "Quantity",
@@ -132,6 +139,7 @@ EXACT_COLUMN_MAP = {
     "unit price per pc": "Unit Price",
     "pre-tax unit price": "Unit Price",
     "price per unit": "Unit Price",
+    "historical price": "Unit Price",        # Sigma Aero RFQ — last agreed unit price
     "unit cost": "Unit Price",               # Woodward forecast
     "item cost": "Unit Price",               # Safran HAL Excel
     "price": "Unit Price",
@@ -320,7 +328,7 @@ async def map_columns_with_ai(source_columns: list[str]) -> dict[str, str]:
 
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=settings.AI_MODEL,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -343,45 +351,63 @@ async def map_columns_with_ai(source_columns: list[str]) -> dict[str, str]:
         return _fallback_mapping(source_columns)
 
 
-def _fallback_mapping(source_columns: list[str]) -> dict[str, str]:
-    """Basic keyword-based fallback mapping when AI is unavailable."""
-    keyword_map = {
-        "material": "Customer Part #",
-        "part": "Customer Part #",
-        "cus": "Customer Part #",
-        "customer": "Customer Part #",
-        "maini": "Maini Part #",
-        "desc": "Description",
-        "description": "Description",
-        "qty": "Quantity",
-        "quantity": "Quantity",
-        "price": "Unit Price",
-        "unit": "Unit Price",
-        "total": "Total Price",
-        "amount": "Total Price",
-        "currency": "Currency",
-        "country": "Country",
-        "hsn": "HSN Code",
-        "delivery": "Delivery Date",
-        "date": "Delivery Date",
-        "po": "PO Number",
-        "order": "PO Number",
-        "name": "Customer Name",
-        "remark": "Remarks",
-        "note": "Remarks",
-    }
+def _keyword_guess(col_lower: str) -> str | None:
+    """Conservative WHOLE-TOKEN keyword guess. Returns None (→ UNMAPPED) when
+    unsure — a wrong guess (e.g. "Cust. Group" → part #, "Kit component" → PO)
+    is worse than no guess. Tokens, never substrings: avoids 'po' matching
+    'comPOnent' and 'cus' matching 'CUStomer Group'.
+    """
+    tokens = set(re.split(r"[^a-z0-9]+", col_lower)) - {""}
 
+    def has(*words):  # all words present as whole tokens
+        return all(w in tokens for w in words)
+
+    # ── Most specific first ──────────────────────────────────────────────
+    if "maini" in tokens:
+        return "Maini Part #"
+    if has("supplier", "material", "number") or has("vendor", "item") or has("supplier", "part"):
+        return "Maini Part #"
+    # Description must win over the generic "material"/"part" part-number rule
+    if "description" in tokens or "desc" in tokens or "designation" in tokens or "discription" in tokens:
+        return "Description"
+    if "quantity" in tokens or "qty" in tokens or "qte" in tokens:
+        return "Quantity"
+    if "price" in tokens or "prix" in tokens:
+        return "Unit Price"
+    if "currency" in tokens or "curr" in tokens:
+        return "Currency"
+    if "country" in tokens:
+        return "Country"
+    if "hsn" in tokens:
+        return "HSN Code"
+    if has("po", "number") or has("purchase", "order") or has("po", "no") or col_lower.strip() == "po":
+        return "PO Number"
+    if "date" in tokens or "delivery" in tokens:
+        return "Delivery Date"
+    # Part-number — only on clear part tokens, and NOT group/org/kit/etc.
+    _NOT_PART = {"group", "org", "organization", "kit", "alternative", "config",
+                 "configuration", "standard", "option", "header", "component", "plan", "index"}
+    if tokens & _NOT_PART:
+        return None
+    if has("customer", "part") or has("cust", "part") or has("comp", "part"):
+        return "Customer Part #"
+    if "part" in tokens and not (tokens & _NOT_PART):
+        return "Customer Part #"
+    if has("customer", "material", "number") or has("material", "number"):
+        return "Customer Part #"
+    return None
+
+
+def _fallback_mapping(source_columns: list[str]) -> dict[str, str]:
+    """Keyword fallback when AI is unavailable. Exact map first, then a
+    conservative whole-token guess; otherwise UNMAPPED."""
     mapping = {}
     for col in source_columns:
         col_lower = _normalize_column_name(col)
-        matched = EXACT_COLUMN_MAP.get(col_lower, "UNMAPPED")
-        if matched == "UNMAPPED" and col_lower not in EXACT_COLUMN_MAP:
-            for keyword, schema_col in keyword_map.items():
-                if keyword in col_lower:
-                    matched = schema_col
-                    break
-        mapping[col] = matched
-
+        if col_lower in EXACT_COLUMN_MAP:
+            mapping[col] = EXACT_COLUMN_MAP[col_lower]
+        else:
+            mapping[col] = _keyword_guess(col_lower) or "UNMAPPED"
     return mapping
 
 

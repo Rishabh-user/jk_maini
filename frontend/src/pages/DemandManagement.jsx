@@ -9,7 +9,8 @@ import {
 import {
   fetchDemandStats, compareDemand, uploadDemandFile, fetchDemandReports,
   fetchDemandUploads, previewDemandUpload, deleteDemandUpload,
-  fetchCorrections, fetchCorrectionStats, createCorrection, reviewCorrection, deleteCorrection
+  fetchCorrections, fetchCorrectionStats, createCorrection, reviewCorrection, deleteCorrection,
+  fetchComparableReports, fetchFollowups, createFollowup, updateFollowup, deleteFollowup
 } from '../services/api'
 
 const TABS = [
@@ -69,7 +70,7 @@ function AggregationTab({ stats, onRefresh }) {
   const [expandedStep, setExpandedStep] = useState(null)
 
   const DATA_SOURCES = [
-    { id: 'email', label: 'Email Attachments', icon: Mail,          color: 'blue',   count: stats?.sources?.email || 0 },
+    { id: 'email', label: 'Extracted Files',    icon: Mail,          color: 'blue',   count: stats?.sources?.email || 0 },
     { id: 'portal', label: 'Customer Portals', icon: Globe,         color: 'purple', count: 0, comingSoon: true },
     { id: 'pdf',   label: 'PDF Documents',     icon: FileText,      color: 'red',    count: stats?.sources?.pdf || 0 },
     { id: 'excel', label: 'Excel / CSV',        icon: File,         color: 'green',  count: (stats?.sources?.excel || 0) + (stats?.sources?.csv || 0) },
@@ -134,9 +135,14 @@ function AggregationTab({ stats, onRefresh }) {
         </div>
         {stats && (
           <div className="grid grid-cols-3 gap-4 mt-4 pt-4 border-t border-gray-100">
-            <StatCard label="ZSO Reports"    value={stats.zso_reports}                 color="blue" />
-            <StatCard label="Total Line Items" value={stats.total_line_items?.toLocaleString()} color="green" />
-            <StatCard label="Demand Uploads" value={Object.values(stats.uploads || {}).reduce((a, b) => a + b, 0)} color="purple" />
+            <StatCard label="ZSO Reports"     value={stats.zso_reports}                        color="blue"   />
+            <StatCard label="Total Line Items" value={stats.total_line_items?.toLocaleString()} color="green"  />
+            <StatCard
+              label="Unmatched Parts"
+              value={stats.unmatched_parts ?? '—'}
+              color={stats.unmatched_parts > 0 ? "red" : "green"}
+              subtitle="No Maini Part # in latest ZSO"
+            />
           </div>
         )}
       </div>
@@ -200,87 +206,141 @@ function ComparisonTab() {
   const [reports, setReports] = useState([])
   const [currentId, setCurrentId] = useState('')
   const [previousId, setPreviousId] = useState('')
+  const [comparable, setComparable] = useState(null)   // { target, comparables: [] }
+  const [loadingComparable, setLoadingComparable] = useState(false)
   const [comparison, setComparison] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [activeSection, setActiveSection] = useState('changes')
+  const [followups, setFollowups] = useState([])
 
   useEffect(() => {
     fetchDemandReports().then(r => setReports(r.data)).catch(console.error)
+  }, [])
+
+  // When the "current" report changes, fetch only the reports that are
+  // actually comparable to it (by part-number overlap) for the second dropdown.
+  useEffect(() => {
+    setPreviousId(''); setComparison(null); setComparable(null)
+    if (!currentId) return
+    setLoadingComparable(true)
+    fetchComparableReports(currentId)
+      .then(r => setComparable(r.data))
+      .catch(err => setError(err.response?.data?.detail || err.message))
+      .finally(() => setLoadingComparable(false))
+  }, [currentId])
+
+  const loadFollowups = useCallback(async (cur, prev) => {
+    try {
+      const res = await fetchFollowups(cur, prev)
+      setFollowups(res.data || [])
+    } catch { setFollowups([]) }
   }, [])
 
   const runComparison = async () => {
     if (!currentId || !previousId) { setError('Select both reports'); return }
     if (currentId === previousId) { setError('Select two different reports'); return }
     setLoading(true); setError(''); setComparison(null)
-    try { const res = await compareDemand(currentId, previousId); setComparison(res.data) }
+    try {
+      const res = await compareDemand(currentId, previousId)
+      setComparison(res.data)
+      await loadFollowups(currentId, previousId)
+    }
     catch (err) { setError(err.response?.data?.detail || err.message) }
     finally { setLoading(false) }
   }
 
+  // ── Follow-up actions ──
+  const logFollowup = async (item) => {
+    const note = window.prompt(`Log follow-up for ${item.part}\n(e.g. "Confirmed +500 with customer on call"):`, '')
+    if (note === null) return
+    try {
+      await createFollowup({
+        current_report_id: Number(currentId),
+        previous_report_id: Number(previousId),
+        row_id: item.row_id, part: item.part, customer: item.customer,
+        change_type: item.change_type,
+        prev_qty: item.prev_qty ?? null, curr_qty: item.curr_qty ?? item.qty ?? null,
+        note,
+      })
+      await loadFollowups(currentId, previousId)
+    } catch (err) { alert('Failed: ' + (err.response?.data?.detail || err.message)) }
+  }
+  const toggleFollowup = async (f) => {
+    try { await updateFollowup(f.id, { status: f.status === 'done' ? 'open' : 'done' }); await loadFollowups(currentId, previousId) }
+    catch (err) { alert('Failed: ' + (err.response?.data?.detail || err.message)) }
+  }
+  const removeFollowup = async (f) => {
+    if (!confirm('Delete this follow-up?')) return
+    try { await deleteFollowup(f.id); await loadFollowups(currentId, previousId) }
+    catch (err) { alert('Failed: ' + (err.response?.data?.detail || err.message)) }
+  }
+  const followupRowIds = new Set(followups.map(f => f.row_id).filter(Boolean))
+
   const reportLabel = (r) => {
-    // Customer name(s) — most meaningful identifier
     const customers = (r.customers || []).filter(Boolean)
     const customerStr = customers.length > 0
       ? customers.slice(0, 2).join(' · ') + (customers.length > 2 ? ` +${customers.length - 2}` : '')
-      : null
-
-    // PO numbers — up to 2, truncated if long
-    const pos = (r.po_numbers || []).filter(Boolean)
-    const poStr = pos.length > 0
-      ? pos.slice(0, 2).map(p => p.length > 14 ? p.slice(0, 14) + '…' : p).join(', ')
-      : null
-
-    // Date — short format "Jun 09"
+      : 'No customer name'
     const date = r.created_at
       ? new Date(r.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })
       : ''
-
     const itemStr = r.total_items ? `${r.total_items} items` : ''
+    const parts = [customerStr, itemStr].filter(Boolean)
+    return `#${r.id} — ${parts.join('  ·  ')}  (${date})`
+  }
 
-    // Build label: "Safran HAL · 12 items · PO 25PO000950 (Jun 09)"
-    const parts = [customerStr, itemStr, poStr ? `PO ${poStr}` : null].filter(Boolean)
-    return `#${r.id}  ${parts.length ? '— ' + parts.join('  ·  ') : ''}  (${date})`
+  // Label for a comparable report option: version + match strength
+  const comparableLabel = (c) => {
+    const customers = (c.customers || []).filter(Boolean)
+    const cust = customers.length ? customers.slice(0, 2).join(' · ') : 'No customer name'
+    const date = c.created_at ? new Date(c.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : ''
+    return `${c.version} · ${c.overlap_pct}% match (${c.shared_parts} shared) — ${cust} (${date})`
   }
 
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-xl border border-gray-200 p-6">
         <h2 className="text-lg font-semibold text-gray-900 mb-1">Demand Comparison</h2>
-        <p className="text-sm text-gray-500 mb-5">Select two ZSO reports to compare demand changes between cycles.</p>
+        <p className="text-sm text-gray-500 mb-5">
+          Pick a report, then compare it against an earlier <strong>version of the same demand</strong>.
+          Only reports that share part numbers are offered — so you never compare unrelated customers by mistake.
+        </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-          {[
-            ['Current Report (newer)', currentId, setCurrentId],
-            ['Previous Report (older)', previousId, setPreviousId],
-          ].map(([label, val, setter]) => (
-            <div key={label}>
-              <label className="block text-xs font-medium text-gray-700 mb-1">{label}</label>
-              <select value={val} onChange={e => setter(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white">
-                <option value="">Select report…</option>
-                {reports.map(r => (
-                  <option key={r.id} value={r.id}>{reportLabel(r)}</option>
-                ))}
-              </select>
-              {/* Show a richer preview card for the selected report */}
-              {val && (() => {
-                const sel = reports.find(r => String(r.id) === String(val))
-                if (!sel) return null
-                const customers = (sel.customers || []).filter(Boolean)
-                const pos = (sel.po_numbers || []).filter(Boolean)
-                return (
-                  <div className="mt-2 px-3 py-2 bg-blue-50 border border-blue-100 rounded-lg text-xs text-blue-800 space-y-0.5">
-                    {customers.length > 0 && <div><span className="font-medium">Customer:</span> {customers.join(', ')}</div>}
-                    {pos.length > 0 && <div><span className="font-medium">PO(s):</span> {pos.join(', ')}</div>}
-                    {sel.total_items > 0 && <div><span className="font-medium">Line Items:</span> {sel.total_items}</div>}
-                    <div><span className="font-medium">Generated:</span> {sel.created_at ? new Date(sel.created_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}</div>
-                    <div><span className="font-medium">Status:</span> <span className="capitalize">{sel.status}</span></div>
-                  </div>
-                )
-              })()}
-            </div>
-          ))}
+          {/* Current report — free choice across all reports */}
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Report to analyse {comparable?.target?.version ? `(${comparable.target.version})` : ''}</label>
+            <select value={currentId} onChange={e => setCurrentId(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white">
+              <option value="">Select report…</option>
+              {reports.map(r => (
+                <option key={r.id} value={r.id}>{reportLabel(r)}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Previous version — filtered to comparable reports only */}
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Compare against (matching versions only)</label>
+            <select value={previousId} onChange={e => setPreviousId(e.target.value)}
+              disabled={!currentId || loadingComparable}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white disabled:bg-gray-50 disabled:text-gray-400">
+              <option value="">
+                {!currentId ? 'Select a report first…'
+                  : loadingComparable ? 'Finding matching versions…'
+                  : (comparable?.comparables?.length ? 'Select a matching version…' : 'No matching versions found')}
+              </option>
+              {(comparable?.comparables || []).map(c => (
+                <option key={c.id} value={c.id}>{comparableLabel(c)}</option>
+              ))}
+            </select>
+            {currentId && !loadingComparable && comparable && comparable.comparables.length === 0 && (
+              <p className="mt-1.5 text-xs text-amber-600">
+                No other report shares enough part numbers with this one. Upload an earlier/later version of the same demand to compare.
+              </p>
+            )}
+          </div>
         </div>
 
         <button onClick={runComparison} disabled={loading || !currentId || !previousId}
@@ -295,12 +355,13 @@ function ComparisonTab() {
       {comparison && (
         <>
           {/* Summary */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
             {[
               { label: 'Qty Increases', count: comparison.summary.total_increases, color: 'green', icon: TrendingUp, id: 'changes' },
               { label: 'Qty Decreases', count: comparison.summary.total_decreases, color: 'red', icon: TrendingDown, id: 'changes' },
               { label: 'New Items', count: comparison.summary.total_new, color: 'blue', icon: Plus, id: 'new' },
               { label: 'Removed Items', count: comparison.summary.total_removed, color: 'yellow', icon: AlertTriangle, id: 'removed' },
+              { label: 'Needs Follow-up', count: comparison.summary.abrupt_changes ?? 0, color: 'orange', icon: AlertTriangle, id: 'followup' },
             ].map(s => (
               <button key={s.label} onClick={() => setActiveSection(s.id)}
                 className={`border bg-${s.color}-50 border-${s.color}-200 rounded-lg p-4 text-left hover:shadow-sm transition-shadow ${activeSection === s.id ? 'ring-2 ring-' + s.color + '-400' : ''}`}>
@@ -316,10 +377,10 @@ function ComparisonTab() {
           {activeSection === 'changes' && (
             <ComparisonTable
               title="Quantity Changes"
-              columns={['Cust Part #', 'Customer', 'Prev Qty', 'Curr Qty', 'Change', 'PO / Forecast', 'Ship Date']}
+              columns={['Cust Part #', 'Customer', 'Prev Qty', 'Curr Qty', 'Change', 'PO / Forecast', 'Ship Date', 'Follow-up']}
               rows={[...comparison.increases, ...comparison.decreases]}
               renderRow={(item, i) => (
-                <tr key={i} className={`border-b border-gray-50 ${item.change > 0 ? 'bg-green-50/20' : 'bg-red-50/20'}`}>
+                <tr key={i} className={`border-b border-gray-50 ${item.abrupt ? 'bg-orange-50/40' : item.change > 0 ? 'bg-green-50/20' : 'bg-red-50/20'}`}>
                   <td className="px-4 py-2 font-mono text-xs text-gray-800">{item.part}</td>
                   <td className="px-4 py-2 text-sm text-gray-600">{item.customer || '—'}</td>
                   <td className="px-4 py-2 text-sm">{item.prev_qty}</td>
@@ -331,6 +392,7 @@ function ComparisonTab() {
                   </td>
                   <td className="px-4 py-2 text-xs text-gray-500">{item.po || '—'}</td>
                   <td className="px-4 py-2 text-xs text-gray-500">{item.ship_date || '—'}</td>
+                  <td className="px-4 py-2">{renderFollowupCell(item, followupRowIds, logFollowup)}</td>
                 </tr>
               )}
               empty="No quantity changes between these two reports."
@@ -340,7 +402,7 @@ function ComparisonTab() {
           {activeSection === 'new' && (
             <ComparisonTable
               title="New Items (in current, not in previous)"
-              columns={['Cust Part #', 'Customer', 'Qty', 'PO / Forecast', 'Ship Date']}
+              columns={['Cust Part #', 'Customer', 'Qty', 'PO / Forecast', 'Ship Date', 'Follow-up']}
               rows={comparison.new_items}
               renderRow={(item, i) => (
                 <tr key={i} className="border-b border-gray-50 bg-blue-50/20">
@@ -349,6 +411,7 @@ function ComparisonTab() {
                   <td className="px-4 py-2 text-sm font-semibold text-blue-700">{item.qty}</td>
                   <td className="px-4 py-2 text-xs text-gray-500">{item.po || '—'}</td>
                   <td className="px-4 py-2 text-xs text-gray-500">{item.ship_date || '—'}</td>
+                  <td className="px-4 py-2">{renderFollowupCell(item, followupRowIds, logFollowup)}</td>
                 </tr>
               )}
               empty="No new items."
@@ -358,7 +421,7 @@ function ComparisonTab() {
           {activeSection === 'removed' && (
             <ComparisonTable
               title="Removed Items (in previous, not in current)"
-              columns={['Cust Part #', 'Customer', 'Qty', 'PO / Forecast', 'Ship Date']}
+              columns={['Cust Part #', 'Customer', 'Qty', 'PO / Forecast', 'Ship Date', 'Follow-up']}
               rows={comparison.removed_items}
               renderRow={(item, i) => (
                 <tr key={i} className="border-b border-gray-50 bg-yellow-50/20">
@@ -367,10 +430,62 @@ function ComparisonTab() {
                   <td className="px-4 py-2 text-sm font-semibold text-yellow-700">{item.qty}</td>
                   <td className="px-4 py-2 text-xs text-gray-500">{item.po || '—'}</td>
                   <td className="px-4 py-2 text-xs text-gray-500">{item.ship_date || '—'}</td>
+                  <td className="px-4 py-2">{renderFollowupCell(item, followupRowIds, logFollowup)}</td>
                 </tr>
               )}
               empty="No removed items."
             />
+          )}
+
+          {/* Follow-up checklist / audit trail */}
+          {activeSection === 'followup' && (
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-100 bg-orange-50 flex items-center gap-2">
+                <AlertTriangle size={15} className="text-orange-600" />
+                <h3 className="text-sm font-semibold text-orange-800">
+                  Customer Follow-ups <span className="text-orange-400 font-normal ml-1">({followups.length})</span>
+                </h3>
+              </div>
+              {followups.length === 0 ? (
+                <div className="px-5 py-8 text-center text-sm text-gray-400">
+                  No follow-ups logged yet. Open the Increases/Decreases/New/Removed tabs and click
+                  <span className="mx-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 text-xs"><AlertTriangle size={11}/> Log follow-up</span>
+                  on an abrupt change to start the audit trail.
+                </div>
+              ) : (
+                <ul className="divide-y divide-gray-100">
+                  {followups.map(f => (
+                    <li key={f.id} className="px-5 py-3 flex items-start gap-3">
+                      <button onClick={() => toggleFollowup(f)} className="mt-0.5 shrink-0" title={f.status === 'done' ? 'Mark open' : 'Mark done'}>
+                        {f.status === 'done'
+                          ? <CheckCircle size={18} className="text-green-600" />
+                          : <Clock size={18} className="text-orange-500" />}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-xs text-gray-800">{f.part || '—'}</span>
+                          {f.customer && <span className="text-xs text-gray-500">· {f.customer}</span>}
+                          <span className={`text-[11px] px-1.5 py-0.5 rounded capitalize ${
+                            f.change_type === 'new' ? 'bg-blue-100 text-blue-700'
+                            : f.change_type === 'removed' ? 'bg-yellow-100 text-yellow-700'
+                            : f.change_type === 'increase' ? 'bg-green-100 text-green-700'
+                            : 'bg-red-100 text-red-700'}`}>{f.change_type}</span>
+                          {(f.prev_qty != null || f.curr_qty != null) && (
+                            <span className="text-[11px] text-gray-400">{f.prev_qty ?? '—'} → {f.curr_qty ?? '—'}</span>
+                          )}
+                          {f.status === 'done' && <span className="text-[11px] text-green-600">✓ resolved</span>}
+                        </div>
+                        <p className={`text-sm mt-0.5 ${f.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-700'}`}>{f.note || '(no note)'}</p>
+                        <p className="text-[11px] text-gray-400 mt-0.5">{f.created_at ? new Date(f.created_at).toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) : ''}</p>
+                      </div>
+                      <button onClick={() => removeFollowup(f)} className="p-1 rounded hover:bg-red-50 text-red-400 shrink-0" title="Delete">
+                        <Trash2 size={15} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
         </>
       )}
@@ -382,6 +497,22 @@ function ComparisonTab() {
         </div>
       )}
     </div>
+  )
+}
+
+// Renders the Follow-up cell for a comparison row: shows an abrupt badge +
+// "Log follow-up" button, or a ✓ Logged chip if one already exists for the row.
+function renderFollowupCell(item, followupRowIds, logFollowup) {
+  const logged = item.row_id && followupRowIds.has(item.row_id)
+  if (logged) {
+    return <span className="inline-flex items-center gap-1 text-xs text-green-700"><CheckCircle size={13} /> Logged</span>
+  }
+  if (!item.abrupt) return <span className="text-xs text-gray-300">—</span>
+  return (
+    <button onClick={() => logFollowup(item)}
+      className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium bg-orange-100 text-orange-700 rounded hover:bg-orange-200">
+      <AlertTriangle size={12} /> Log follow-up
+    </button>
   )
 }
 
@@ -791,11 +922,12 @@ function MasterCorrectionTab() {
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
-function StatCard({ label, value, color }) {
+function StatCard({ label, value, color, subtitle }) {
   return (
     <div className={`border border-${color}-200 bg-${color}-50 rounded-lg p-3`}>
       <p className={`text-xs font-medium text-${color}-700`}>{label}</p>
       <p className={`text-xl font-bold text-${color}-900`}>{value ?? 0}</p>
+      {subtitle && <p className={`text-xs text-${color}-600 mt-0.5`}>{subtitle}</p>}
     </div>
   )
 }

@@ -44,11 +44,26 @@ async def generate_zso(
     if not raw_data_entries:
         raise HTTPException(status_code=400, detail="No processed data found for this email. Process the email first.")
 
-    # Combine all mapped rows
+    # Combine all mapped rows + collect any sender instructions detected during extraction
     all_mapped_rows = []
+    instructions: list = []
     for entry in raw_data_entries:
-        if entry.mapped_data and isinstance(entry.mapped_data, list):
-            all_mapped_rows.extend(entry.mapped_data)
+        mapped = entry.mapped_data if isinstance(entry.mapped_data, list) else []
+        ed = entry.extracted_data if isinstance(entry.extracted_data, dict) else {}
+        raw_rows = ed.get("rows") if isinstance(ed.get("rows"), list) else []
+        # Back-fill the delivery-schedule "Type" (PO vs Fcst) onto mapped rows that
+        # were processed before Type-capture existed — so old uploads label correctly
+        # on regenerate without needing a re-process.
+        for i, mrow in enumerate(mapped):
+            if isinstance(mrow, dict) and not mrow.get("_demand_type") and i < len(raw_rows):
+                rr = raw_rows[i]
+                if isinstance(rr, dict):
+                    tval = next((v for k, v in rr.items() if str(k).strip().lower() == "type" and str(v).strip()), None)
+                    if tval:
+                        mrow["_demand_type"] = str(tval).strip()
+        all_mapped_rows.extend(mapped)
+        if isinstance(ed.get("instructions"), list):
+            instructions.extend(ed["instructions"])
 
     if not all_mapped_rows:
         raise HTTPException(status_code=400, detail="No structured data rows found in attachments")
@@ -107,8 +122,17 @@ async def generate_zso(
         matched_rows = list(matched_rows) + forecast_rows
         logger.info(f"ZSO enriched with {len(forecast_rows)} internal forecast rows")
 
+    # ── Apply sender instructions (e.g. "discard PO 200981234") ──────────────
+    applied_instructions: list = []
+    if instructions:
+        from app.services.zso_service import apply_instructions
+        matched_rows, applied_instructions = apply_instructions(matched_rows, instructions)
+        logger.info(f"Applied {len(applied_instructions)} sender instruction(s) to ZSO")
+
     # Build ZSO report
     zso_data = build_zso_data(matched_rows, kas_name=current_user.full_name, forex_rates=forex_rates)
+    if applied_instructions:
+        zso_data["applied_instructions"] = applied_instructions
 
     # Save report
     report = await save_zso_report(db, email.id, current_user, zso_data)
