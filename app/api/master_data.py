@@ -15,27 +15,98 @@ from app.utils.logging import logger
 router = APIRouter(prefix="/master-data", tags=["Master Data"])
 
 
-# Column name mapping: maps common Excel header variations to DB field names
+def _normalize_column_name(header: str) -> str:
+    return " ".join(str(header or "").replace("_", " ").replace("-", " ").strip().lower().split())
+
+
+# Column name mapping: maps common Excel header variations to DB field names.
+# Keep this semantic, not customer-specific: different customers use different
+# labels for the same part mapping concept.
 COLUMN_MAP = {
     "customer_name": ["customer name", "customer", "cust name", "client name"],
-    "customer_location": ["customer location", "location", "cust location", "city"],
-    "customer_part_no": ["customer_part_no", "customer part no", "customer part #", "cust part no", "cust part #", "part no", "part number", "customer part number"],
-    "maini_part_no": ["maini_part_no", "maini part no", "maini part #", "maini part number", "jk maini part", "maini no"],
-    "description": ["description", "desc", "part description", "item description"],
+    "customer_location": ["customer location", "location", "cust location", "city", "site", "site location"],
+    "customer_part_no": [
+        "customer_part_no",
+        "customer part no",
+        "customer part #",
+        "customer part",
+        "cust part no",
+        "cust part #",
+        "cust part",
+        "customer material",
+        "customer material no",
+        "customer material number",
+        "material",
+        "material no",
+        "material number",
+        "part no",
+        "part number",
+        "customer part number",
+    ],
+    "maini_part_no": [
+        "maini_part_no",
+        "maini part no",
+        "maini part #",
+        "maini part",
+        "maini part number",
+        "jk maini part",
+        "maini no",
+        "f part #",
+        "f part no",
+        "f part",
+        "f part number",
+        "finished part #",
+        "finished part no",
+        "finished part",
+        "internal part #",
+        "internal part no",
+        "internal part number",
+    ],
+    "description": ["description", "discription", "desc", "part description", "item description", "material description"],
     "country": ["country", "country code", "origin"],
-    "unit_price": ["unit_price", "unit price", "price", "rate"],
+    "unit_price": [
+        "unit_price",
+        "unit price",
+        "unit price per pc",
+        "unit price per piece",
+        "price per pc",
+        "price per piece",
+        "unit rate",
+        "price",
+        "rate",
+        "net price",
+    ],
     "currency": ["currency", "curr", "currency code"],
     "hsn_code": ["hsn_code", "hsn code", "hsn", "hs code"],
+}
+
+NORMALIZED_COLUMN_MAP = {
+    field: {_normalize_column_name(variant) for variant in variants}
+    for field, variants in COLUMN_MAP.items()
 }
 
 
 def _match_column(header: str) -> str | None:
     """Match an Excel column header to a DB field name."""
-    h = header.strip().lower()
-    for field, variants in COLUMN_MAP.items():
+    h = _normalize_column_name(header)
+    for field, variants in NORMALIZED_COLUMN_MAP.items():
         if h in variants:
             return field
     return None
+
+
+def _clean_text_value(value) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, bool):
+        return str(value).strip()
+    try:
+        numeric = float(value)
+        if numeric.is_integer() and str(value).strip().replace(".", "", 1).isdigit():
+            return str(int(numeric))
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
 
 
 def _detect_header_row(df: pd.DataFrame) -> pd.DataFrame:
@@ -141,7 +212,7 @@ async def upload_master_data(
                 except (ValueError, TypeError):
                     val = None
             else:
-                val = str(val).strip() if val is not None else None
+                val = _clean_text_value(val)
             record[db_field] = val
 
         cust_part = record.get("customer_part_no")

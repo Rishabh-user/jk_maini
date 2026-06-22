@@ -10,6 +10,7 @@ from app.models.user import User, UserRole
 from app.models.email import Email
 from app.models.data import RawData, ZSOReport
 from app.schemas.data import ZSOGenerateRequest, ZSOReportResponse, ColumnMappingRequest, ColumnMappingResponse
+from app.models.data import ForexRate
 from app.services.matching_service import match_with_maini_parts
 from app.services.zso_service import build_zso_data, save_zso_report
 from app.services.excel_export import export_zso_to_excel
@@ -43,11 +44,26 @@ async def generate_zso(
     if not raw_data_entries:
         raise HTTPException(status_code=400, detail="No processed data found for this email. Process the email first.")
 
-    # Combine all mapped rows
+    # Combine all mapped rows + collect any sender instructions detected during extraction
     all_mapped_rows = []
+    instructions: list = []
     for entry in raw_data_entries:
-        if entry.mapped_data and isinstance(entry.mapped_data, list):
-            all_mapped_rows.extend(entry.mapped_data)
+        mapped = entry.mapped_data if isinstance(entry.mapped_data, list) else []
+        ed = entry.extracted_data if isinstance(entry.extracted_data, dict) else {}
+        raw_rows = ed.get("rows") if isinstance(ed.get("rows"), list) else []
+        # Back-fill the delivery-schedule "Type" (PO vs Fcst) onto mapped rows that
+        # were processed before Type-capture existed — so old uploads label correctly
+        # on regenerate without needing a re-process.
+        for i, mrow in enumerate(mapped):
+            if isinstance(mrow, dict) and not mrow.get("_demand_type") and i < len(raw_rows):
+                rr = raw_rows[i]
+                if isinstance(rr, dict):
+                    tval = next((v for k, v in rr.items() if str(k).strip().lower() == "type" and str(v).strip()), None)
+                    if tval:
+                        mrow["_demand_type"] = str(tval).strip()
+        all_mapped_rows.extend(mapped)
+        if isinstance(ed.get("instructions"), list):
+            instructions.extend(ed["instructions"])
 
     if not all_mapped_rows:
         raise HTTPException(status_code=400, detail="No structured data rows found in attachments")
@@ -55,8 +71,68 @@ async def generate_zso(
     # Match with maini_parts
     matched_rows = await match_with_maini_parts(db, all_mapped_rows)
 
+    # Fetch current forex rates (most recent per currency)
+    forex_result = await db.execute(
+        select(ForexRate).order_by(ForexRate.currency_from, ForexRate.effective_date.desc())
+    )
+    all_forex = forex_result.scalars().all()
+    forex_rates: dict[str, dict] = {}
+    seen_currencies: set[str] = set()
+    for fx in all_forex:
+        if fx.currency_from not in seen_currencies:
+            seen_currencies.add(fx.currency_from)
+            forex_rates[fx.currency_from] = {
+                "rate": fx.rate,
+                "currency_to": fx.currency_to,
+                "effective_date": fx.effective_date.isoformat(),
+                "notes": fx.notes,
+            }
+    # INR→INR is always 1
+    forex_rates.setdefault("INR", {"rate": 1.0, "currency_to": "INR", "effective_date": "", "notes": "Base currency"})
+
+    # ── Enrich with internal forecast data ──────────────────────────────
+    # Primary match: by customer part number (always present, customer name often missing).
+    # Fallback: by customer name (catches parts not in the demand file at all).
+    from app.services.forecast_service import get_forecast_rows_by_parts, get_forecast_rows_for_zso
+
+    # 1. Match forecast by customer part numbers present in demand rows
+    demand_part_numbers = list({
+        r.get("Customer Part #", "").strip()
+        for r in matched_rows
+        if r.get("Customer Part #", "").strip()
+    })
+    forecast_rows = await get_forecast_rows_by_parts(db, demand_part_numbers)
+
+    # 2. Fallback: for any customer name in demand, pick up forecast parts NOT already matched
+    #    (e.g. forecast parts for this customer that weren't in this specific demand file)
+    already_matched_parts = {r["Customer Part #"].strip().lower() for r in forecast_rows}
+    customer_names_in_demand = list({
+        r.get("Customer Name", "").strip()
+        for r in matched_rows
+        if r.get("Customer Name", "").strip()
+    })
+    for cname in customer_names_in_demand:
+        extra_rows = await get_forecast_rows_for_zso(db, cname)
+        new_rows = [r for r in extra_rows if r["Customer Part #"].strip().lower() not in already_matched_parts]
+        if new_rows:
+            forecast_rows.extend(new_rows)
+            already_matched_parts.update(r["Customer Part #"].strip().lower() for r in new_rows)
+
+    if forecast_rows:
+        matched_rows = list(matched_rows) + forecast_rows
+        logger.info(f"ZSO enriched with {len(forecast_rows)} internal forecast rows")
+
+    # ── Apply sender instructions (e.g. "discard PO 200981234") ──────────────
+    applied_instructions: list = []
+    if instructions:
+        from app.services.zso_service import apply_instructions
+        matched_rows, applied_instructions = apply_instructions(matched_rows, instructions)
+        logger.info(f"Applied {len(applied_instructions)} sender instruction(s) to ZSO")
+
     # Build ZSO report
-    zso_data = build_zso_data(matched_rows, kas_name=current_user.full_name)
+    zso_data = build_zso_data(matched_rows, kas_name=current_user.full_name, forex_rates=forex_rates)
+    if applied_instructions:
+        zso_data["applied_instructions"] = applied_instructions
 
     # Save report
     report = await save_zso_report(db, email.id, current_user, zso_data)
@@ -96,7 +172,14 @@ async def export_zso(
     report_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.KAS)),
+    visible_columns: list[str] | None = None,
 ):
+    """Export ZSO report as Excel.
+
+    Pass `visible_columns` (list of frontend camelCase field names) to restrict
+    the export to only the columns currently shown in the UI.  When omitted all
+    columns are exported.
+    """
     result = await db.execute(select(ZSOReport).where(ZSOReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
@@ -105,7 +188,7 @@ async def export_zso(
     if not report.report_data:
         raise HTTPException(status_code=400, detail="No report data to export")
 
-    filepath = export_zso_to_excel(report.report_data)
+    filepath = export_zso_to_excel(report.report_data, visible_columns=visible_columns or None)
     if not filepath:
         raise HTTPException(status_code=500, detail="Export failed — no data")
 

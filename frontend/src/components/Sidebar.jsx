@@ -14,16 +14,16 @@ import {
 } from 'lucide-react'
 
 const mainLinks = [
-  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/inbox', label: 'Email Inbox', icon: Mail },
-  { to: '/raw-data', label: 'Raw Data Viewer', icon: Table2 },
-  { to: '/upload-document', label: 'Upload Document', icon: Upload },
+  { to: '/dashboard',         label: 'Dashboard',       icon: LayoutDashboard },
+  { to: '/demand-management', label: 'Demand Mgmt',     icon: ClipboardList   },
+  { to: '/inbox',             label: 'Email Inbox',     icon: Mail            },
+  { to: '/raw-data',          label: 'Raw Data Viewer', icon: Table2          },
+  { to: '/upload-document',   label: 'Upload Document', icon: Upload          },
 ]
 
 const dataLinks = [
-  { to: '/master-data', label: 'Master Data', icon: Database },
-  { to: '/zso-reports', label: 'ZSO Reports', icon: FileSpreadsheet },
-  { to: '/demand-management', label: 'Demand Mgmt', icon: ClipboardList },
+  { to: '/master-data',  label: 'Master Data',  icon: Database       },
+  { to: '/zso-reports',  label: 'ZSO Reports',  icon: FileSpreadsheet},
 ]
 
 const operationsLinks = [

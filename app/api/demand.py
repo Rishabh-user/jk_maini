@@ -1,16 +1,65 @@
 import io
+from difflib import SequenceMatcher
+from datetime import datetime, timezone
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from sqlalchemy import select, func
+from pydantic import BaseModel
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.models.user import User, UserRole
-from app.models.data import RawData, ZSOReport, DemandUpload
+from app.models.email import Email
+from app.models.data import RawData, ZSOReport, DemandUpload, MainiPart, MasterDataCorrection, DemandFollowUp
 from app.utils.security import get_current_user, require_roles
 from app.utils.logging import logger
 from app.services.file_parser import FileParser
+
+# ── Comparison tuning thresholds ────────────────────────────────────────────
+OVERLAP_THRESHOLD = 0.30      # min part-number overlap (shared / smaller set) to be "comparable"
+MINOR_CHANGE_THRESHOLD = 0.10  # <10% total-qty change between versions = minor bump (v2.1)
+ABRUPT_CHANGE_THRESHOLD = 0.50  # >50% per-row qty swing = flag for customer follow-up
+
+
+def _report_part_set(report_data: dict | None) -> set[str]:
+    """Distinct customer part numbers in a report (lower-cased, trimmed)."""
+    parts: set[str] = set()
+    if not report_data or not isinstance(report_data, dict):
+        return parts
+    for item in report_data.get("items", []):
+        p = str(item.get("cust_part_no") or item.get("customer_part_no") or "").strip().lower()
+        if p:
+            parts.add(p)
+    return parts
+
+
+def _report_total_qty(report_data: dict | None) -> float:
+    total = 0.0
+    if not report_data or not isinstance(report_data, dict):
+        return total
+    for item in report_data.get("items", []):
+        if str(item.get("po_forecast") or "").strip().lower() == "internal forecast":
+            continue
+        try:
+            total += float(item.get("open_qty", item.get("quantity", 0)) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _overlap_pct(a: set[str], b: set[str]) -> float:
+    """Fraction of the SMALLER set's parts that are shared — intuitive 'match %'."""
+    if not a or not b:
+        return 0.0
+    shared = len(a & b)
+    return shared / min(len(a), len(b))
+
+
+def _filename_sim(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 router = APIRouter(prefix="/demand", tags=["Demand Management"])
 
@@ -32,19 +81,33 @@ async def get_demand_stats(
     zso_count_result = await db.execute(select(func.count(ZSOReport.id)))
     zso_count = zso_count_result.scalar() or 0
 
-    # Count ZSO total line items
-    zso_reports = await db.execute(select(ZSOReport.report_data))
-    total_line_items = 0
-    for (rd,) in zso_reports.all():
-        if rd and isinstance(rd, dict):
-            total_line_items += len(rd.get("items", []))
-
-    # Count demand uploads by type
-    upload_counts = await db.execute(
-        select(DemandUpload.upload_type, func.count(DemandUpload.id))
-        .group_by(DemandUpload.upload_type)
+    # Count ZSO total line items + unmatched parts (no Maini Part #) from LATEST ZSO only
+    # Latest ZSO is the most actionable — unmatched parts there need immediate attention
+    zso_reports_result = await db.execute(
+        select(ZSOReport.report_data).order_by(ZSOReport.created_at.desc())
     )
-    upload_map = {row[0]: row[1] for row in upload_counts.all()}
+    all_report_data = zso_reports_result.all()
+
+    total_line_items = 0
+    unmatched_parts: set[str] = set()   # distinct cust_part_no with no maini_part_no
+
+    for (rd,) in all_report_data:
+        if not rd or not isinstance(rd, dict):
+            continue
+        items = rd.get("items", [])
+        total_line_items += len(items)
+
+    # Unmatched = from LATEST report only (most current picture)
+    if all_report_data:
+        latest_rd = all_report_data[0][0]
+        if latest_rd and isinstance(latest_rd, dict):
+            for item in latest_rd.get("items", []):
+                cust_part = (item.get("cust_part_no") or "").strip()
+                maini_part = (item.get("maini_part_no") or "").strip()
+                po_forecast = (item.get("po_forecast") or "").strip().lower()
+                # Skip Internal Forecast rows — they don't need master data matching
+                if cust_part and not maini_part and po_forecast != "internal forecast":
+                    unmatched_parts.add(cust_part)
 
     return {
         "sources": {
@@ -56,12 +119,7 @@ async def get_demand_stats(
         },
         "zso_reports": zso_count,
         "total_line_items": total_line_items,
-        "uploads": {
-            "vmi": upload_map.get("vmi", 0),
-            "safety_stock": upload_map.get("safety_stock", 0),
-            "sap": upload_map.get("sap", 0),
-            "manual": upload_map.get("manual", 0),
-        },
+        "unmatched_parts": len(unmatched_parts),
     }
 
 
@@ -83,34 +141,57 @@ async def compare_demand(
     if not prev_report:
         raise HTTPException(status_code=404, detail="Previous report not found")
 
-    curr_items = {item.get("cust_part_no", item.get("customer_part_no", "")): item
-                  for item in (curr_report.report_data or {}).get("items", [])}
-    prev_items = {item.get("cust_part_no", item.get("customer_part_no", "")): item
-                  for item in (prev_report.report_data or {}).get("items", [])}
+    curr_raw = (curr_report.report_data or {}).get("items", [])
+    prev_raw = (prev_report.report_data or {}).get("items", [])
+
+    # Use row_id (deterministic UUID) for matching when available — more precise
+    # than part number alone (handles multiple delivery dates / POs per part).
+    # Fall back to cust_part_no for older reports that predate UUID stamping.
+    def _item_key(item: dict) -> str:
+        row_id = item.get("row_id", "")
+        if row_id:
+            return row_id
+        return item.get("cust_part_no", item.get("customer_part_no", ""))
+
+    curr_items = {_item_key(item): item for item in curr_raw if _item_key(item)}
+    prev_items = {_item_key(item): item for item in prev_raw if _item_key(item)}
 
     increases = []
     decreases = []
     new_items = []
     removed_items = []
 
-    for part, curr in curr_items.items():
-        if not part:
+    for key, curr in curr_items.items():
+        if not key:
             continue
         curr_qty = float(curr.get("open_qty", curr.get("quantity", 0)) or 0)
-        if part in prev_items:
-            prev_qty = float(prev_items[part].get("open_qty", prev_items[part].get("quantity", 0)) or 0)
-            diff = curr_qty - prev_qty
-            if diff > 0:
-                increases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff})
-            elif diff < 0:
-                decreases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff})
-        else:
-            new_items.append({"part": part, "customer": curr.get("customer_name", ""), "qty": curr_qty})
-
-    for part, prev in prev_items.items():
-        if part and part not in curr_items:
+        part = curr.get("cust_part_no", curr.get("customer_part_no", key))
+        if key in prev_items:
+            prev = prev_items[key]
             prev_qty = float(prev.get("open_qty", prev.get("quantity", 0)) or 0)
-            removed_items.append({"part": part, "customer": prev.get("customer_name", ""), "qty": prev_qty})
+            diff = curr_qty - prev_qty
+            # Abrupt = relative swing beyond threshold → needs customer follow-up
+            rel = abs(diff) / (prev_qty if prev_qty else 1.0)
+            abrupt = rel > ABRUPT_CHANGE_THRESHOLD
+            if diff > 0:
+                increases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "abrupt": abrupt, "change_type": "increase", "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
+            elif diff < 0:
+                decreases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "abrupt": abrupt, "change_type": "decrease", "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
+        else:
+            # A brand-new line is inherently an abrupt addition worth confirming
+            new_items.append({"part": part, "customer": curr.get("customer_name", ""), "qty": curr_qty, "abrupt": True, "change_type": "new", "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
+
+    for key, prev in prev_items.items():
+        if key and key not in curr_items:
+            prev_qty = float(prev.get("open_qty", prev.get("quantity", 0)) or 0)
+            part = prev.get("cust_part_no", prev.get("customer_part_no", key))
+            removed_items.append({"part": part, "customer": prev.get("customer_name", ""), "qty": prev_qty, "abrupt": True, "change_type": "removed", "po": prev.get("po_forecast", ""), "ship_date": prev.get("ship_date", ""), "row_id": key})
+
+    abrupt_count = (
+        sum(1 for x in increases if x["abrupt"])
+        + sum(1 for x in decreases if x["abrupt"])
+        + len(new_items) + len(removed_items)
+    )
 
     return {
         "increases": increases,
@@ -122,8 +203,128 @@ async def compare_demand(
             "total_decreases": len(decreases),
             "total_new": len(new_items),
             "total_removed": len(removed_items),
+            "abrupt_changes": abrupt_count,
         },
     }
+
+
+# ── Demand follow-ups: audit trail for abrupt changes ───────────────────────
+
+class FollowUpCreate(BaseModel):
+    current_report_id: int
+    previous_report_id: int
+    row_id: str | None = None
+    part: str | None = None
+    customer: str | None = None
+    change_type: str | None = None
+    prev_qty: float | None = None
+    curr_qty: float | None = None
+    note: str | None = None
+
+
+class FollowUpUpdate(BaseModel):
+    note: str | None = None
+    status: str | None = None   # open / done
+
+
+def _followup_dict(f: DemandFollowUp) -> dict:
+    return {
+        "id": f.id,
+        "current_report_id": f.current_report_id,
+        "previous_report_id": f.previous_report_id,
+        "row_id": f.row_id,
+        "part": f.part,
+        "customer": f.customer,
+        "change_type": f.change_type,
+        "prev_qty": f.prev_qty,
+        "curr_qty": f.curr_qty,
+        "note": f.note,
+        "status": f.status,
+        "created_by": f.created_by,
+        "created_at": f.created_at.isoformat() if f.created_at else None,
+        "updated_at": f.updated_at.isoformat() if f.updated_at else None,
+    }
+
+
+@router.get("/followups")
+async def list_followups(
+    current_report_id: int = Query(...),
+    previous_report_id: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """All follow-ups logged for a given comparison pair."""
+    result = await db.execute(
+        select(DemandFollowUp)
+        .where(
+            DemandFollowUp.current_report_id == current_report_id,
+            DemandFollowUp.previous_report_id == previous_report_id,
+        )
+        .order_by(DemandFollowUp.created_at.desc())
+    )
+    return [_followup_dict(f) for f in result.scalars().all()]
+
+
+@router.post("/followups", status_code=201)
+async def create_followup(
+    payload: FollowUpCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    f = DemandFollowUp(
+        current_report_id=payload.current_report_id,
+        previous_report_id=payload.previous_report_id,
+        row_id=payload.row_id,
+        part=payload.part,
+        customer=payload.customer,
+        change_type=payload.change_type,
+        prev_qty=payload.prev_qty,
+        curr_qty=payload.curr_qty,
+        note=payload.note,
+        status="open",
+        created_by=current_user.id,
+    )
+    db.add(f)
+    await db.flush()
+    await db.refresh(f)
+    return _followup_dict(f)
+
+
+@router.patch("/followups/{followup_id}")
+async def update_followup(
+    followup_id: int,
+    payload: FollowUpUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(DemandFollowUp).where(DemandFollowUp.id == followup_id))
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="Follow-up not found")
+    if payload.note is not None:
+        f.note = payload.note
+    if payload.status is not None:
+        if payload.status not in ("open", "done"):
+            raise HTTPException(status_code=400, detail="status must be 'open' or 'done'")
+        f.status = payload.status
+    await db.flush()
+    await db.refresh(f)
+    return _followup_dict(f)
+
+
+@router.delete("/followups/{followup_id}")
+async def delete_followup(
+    followup_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(DemandFollowUp).where(DemandFollowUp.id == followup_id))
+    f = result.scalar_one_or_none()
+    if not f:
+        raise HTTPException(status_code=404, detail="Follow-up not found")
+    await db.delete(f)
+    await db.flush()
+    return {"detail": "Follow-up deleted"}
 
 
 @router.post("/upload")
@@ -182,17 +383,405 @@ async def list_zso_reports_for_comparison(
 ):
     """List ZSO reports available for demand comparison."""
     result = await db.execute(
-        select(ZSOReport.id, ZSOReport.kas_name, ZSOReport.total_inr, ZSOReport.status, ZSOReport.created_at)
+        select(ZSOReport.id, ZSOReport.kas_name, ZSOReport.total_inr, ZSOReport.status,
+               ZSOReport.created_at, ZSOReport.report_data)
         .order_by(ZSOReport.created_at.desc())
-        .limit(20)
+        .limit(50)
     )
     reports = []
     for row in result.all():
+        report_id, kas_name, total_inr, status, created_at, report_data = row
+
+        # Extract meaningful context from report_data
+        customers: list[str] = []
+        total_items: int = 0
+        po_numbers: list[str] = []
+        if report_data and isinstance(report_data, dict):
+            items = report_data.get("items", [])
+            total_items = len(items)
+            seen_customers: set[str] = set()
+            seen_pos: set[str] = set()
+            for item in items:
+                cn = (item.get("customer_name") or "").strip()
+                if cn and cn not in seen_customers:
+                    seen_customers.add(cn)
+                    customers.append(cn)
+                pn = (item.get("po_number") or "").strip()
+                if pn and pn not in seen_pos and item.get("po_forecast") != "Internal Forecast":
+                    seen_pos.add(pn)
+                    po_numbers.append(pn)
+
         reports.append({
-            "id": row[0],
-            "kas_name": row[1],
-            "total_inr": row[2],
-            "status": row[3],
-            "created_at": row[4].isoformat() if row[4] else None,
+            "id": report_id,
+            "kas_name": kas_name,
+            "total_inr": total_inr,
+            "status": status,
+            "created_at": created_at.isoformat() if created_at else None,
+            "customers": customers,          # e.g. ["Safran HAL", "ASCO"]
+            "total_items": total_items,      # number of line items
+            "po_numbers": po_numbers[:3],    # up to 3 PO numbers for context
         })
     return reports
+
+
+def _assign_versions(group: list[dict]) -> dict[int, str]:
+    """Assign version labels (v1, v2, v2.1 …) to a comparable group of reports.
+
+    Ordered by created_at ascending. Each step: if total-qty change vs the
+    previous version is < MINOR_CHANGE_THRESHOLD it's a minor bump (v2 → v2.1),
+    otherwise a major bump (v2 → v3).
+    """
+    ordered = sorted(group, key=lambda r: r["created_at"] or "")
+    labels: dict[int, str] = {}
+    major, minor = 1, 0
+    prev_qty = None
+    for i, r in enumerate(ordered):
+        qty = r["_total_qty"]
+        if i == 0:
+            major, minor = 1, 0
+        else:
+            base = prev_qty if prev_qty else 1.0
+            rel_change = abs(qty - (prev_qty or 0)) / base if base else 1.0
+            if rel_change < MINOR_CHANGE_THRESHOLD:
+                minor += 1
+            else:
+                major += 1
+                minor = 0
+        labels[r["id"]] = f"v{major}" if minor == 0 else f"v{major}.{minor}"
+        prev_qty = qty
+    return labels
+
+
+@router.get("/comparable/{report_id}")
+async def comparable_reports(
+    report_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return reports comparable to the given one, ranked by part-number overlap.
+
+    Matching is based on shared customer part numbers (works even when the
+    customer NAME is blank/inconsistent), boosted by source-filename similarity.
+    Each comparable report carries a version label within the matched group.
+    """
+    # Load all candidate reports (id, created_at, report_data, email_id)
+    result = await db.execute(
+        select(ZSOReport.id, ZSOReport.created_at, ZSOReport.report_data, ZSOReport.email_id)
+        .order_by(ZSOReport.created_at.desc())
+        .limit(100)
+    )
+    rows = result.all()
+
+    # Source filename per report (first attachment of its email)
+    email_ids = [r[3] for r in rows if r[3]]
+    filename_by_email: dict[int, str] = {}
+    if email_ids:
+        em_result = await db.execute(
+            select(Email).where(Email.id.in_(email_ids))
+        )
+        for em in em_result.scalars().all():
+            atts = em.attachments or []
+            if atts:
+                filename_by_email[em.id] = atts[0].filename or ""
+
+    # Build a record per report
+    records: dict[int, dict] = {}
+    for rid, created_at, report_data, email_id in rows:
+        records[rid] = {
+            "id": rid,
+            "created_at": created_at.isoformat() if created_at else None,
+            "_parts": _report_part_set(report_data),
+            "_total_qty": _report_total_qty(report_data),
+            "_filename": filename_by_email.get(email_id, ""),
+            "_customers": sorted({
+                str(it.get("customer_name") or "").strip()
+                for it in (report_data or {}).get("items", [])
+                if str(it.get("customer_name") or "").strip()
+            }) if isinstance(report_data, dict) else [],
+            "_item_count": len((report_data or {}).get("items", [])) if isinstance(report_data, dict) else 0,
+        }
+
+    target = records.get(report_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    # Score every other report against the target
+    comparables = []
+    for rid, rec in records.items():
+        if rid == report_id:
+            continue
+        overlap = _overlap_pct(target["_parts"], rec["_parts"])
+        if overlap < OVERLAP_THRESHOLD:
+            continue
+        fname_sim = _filename_sim(target["_filename"], rec["_filename"])
+        score = round(overlap * 0.8 + fname_sim * 0.2, 4)
+        shared = len(target["_parts"] & rec["_parts"])
+        comparables.append({
+            **rec,
+            "overlap_pct": round(overlap * 100),
+            "filename_sim": round(fname_sim * 100),
+            "score": score,
+            "shared_parts": shared,
+            "is_older": (rec["created_at"] or "") < (target["created_at"] or ""),
+        })
+
+    # Version labels across the matched group (target + comparables)
+    group = [target] + comparables
+    labels = _assign_versions(group)
+
+    def _public(rec: dict) -> dict:
+        return {
+            "id": rec["id"],
+            "created_at": rec["created_at"],
+            "version": labels.get(rec["id"], "v1"),
+            "customers": rec.get("_customers", []),
+            "item_count": rec.get("_item_count", 0),
+            "filename": rec.get("_filename", ""),
+            "overlap_pct": rec.get("overlap_pct"),
+            "filename_sim": rec.get("filename_sim"),
+            "shared_parts": rec.get("shared_parts"),
+            "is_older": rec.get("is_older"),
+        }
+
+    comparables.sort(key=lambda r: r["score"], reverse=True)
+    return {
+        "target": _public(target),
+        "comparables": [_public(c) for c in comparables],
+    }
+
+
+# ── Demand Uploads: list & delete ──────────────────────────────────────────
+
+@router.get("/uploads")
+async def list_demand_uploads(
+    upload_type: str | None = Query(None, description="Filter by type: vmi, safety_stock, manual"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List all demand uploads, optionally filtered by type."""
+    query = select(DemandUpload).order_by(DemandUpload.created_at.desc())
+    if upload_type:
+        query = query.where(DemandUpload.upload_type == upload_type)
+    result = await db.execute(query)
+    uploads = result.scalars().all()
+    return [
+        {
+            "id": u.id,
+            "upload_type": u.upload_type,
+            "filename": u.filename,
+            "row_count": u.row_count,
+            "columns": (u.parsed_data or {}).get("columns", []),
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in uploads
+    ]
+
+
+@router.get("/uploads/{upload_id}/preview")
+async def preview_demand_upload(
+    upload_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return first 50 rows of a demand upload for preview."""
+    result = await db.execute(select(DemandUpload).where(DemandUpload.id == upload_id))
+    upload = result.scalar_one_or_none()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    parsed = upload.parsed_data or {}
+    return {
+        "id": upload.id,
+        "filename": upload.filename,
+        "upload_type": upload.upload_type,
+        "row_count": upload.row_count,
+        "columns": parsed.get("columns", []),
+        "rows": parsed.get("rows", [])[:50],
+    }
+
+
+@router.delete("/uploads/{upload_id}")
+async def delete_demand_upload(
+    upload_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.KAS)),
+):
+    """Delete a demand upload record."""
+    result = await db.execute(select(DemandUpload).where(DemandUpload.id == upload_id))
+    upload = result.scalar_one_or_none()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    await db.delete(upload)
+    await db.flush()
+    return {"detail": f"Deleted upload #{upload_id}"}
+
+
+# ── Master Data Correction Workflow ────────────────────────────────────────
+
+CORRECTABLE_FIELDS = ["maini_part_no", "unit_price", "currency", "description", "country", "hsn_code", "customer_name", "customer_location"]
+
+
+class CorrectionCreate(BaseModel):
+    customer_part_no: str
+    customer_name: str | None = None
+    field_name: str
+    old_value: str | None = None
+    new_value: str
+    reason: str | None = None
+
+
+class CorrectionReview(BaseModel):
+    status: str   # "approved" | "rejected"
+    review_notes: str | None = None
+
+
+@router.get("/corrections")
+async def list_corrections(
+    status: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List all master data correction requests."""
+    query = select(MasterDataCorrection).order_by(MasterDataCorrection.created_at.desc())
+    if status:
+        query = query.where(MasterDataCorrection.status == status)
+    result = await db.execute(query)
+    corrections = result.scalars().all()
+    return [
+        {
+            "id": c.id,
+            "customer_part_no": c.customer_part_no,
+            "customer_name": c.customer_name,
+            "field_name": c.field_name,
+            "old_value": c.old_value,
+            "new_value": c.new_value,
+            "reason": c.reason,
+            "status": c.status,
+            "requested_by": c.requested_by,
+            "reviewed_by": c.reviewed_by,
+            "reviewed_at": c.reviewed_at.isoformat() if c.reviewed_at else None,
+            "review_notes": c.review_notes,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+        }
+        for c in corrections
+    ]
+
+
+@router.get("/corrections/stats")
+async def correction_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Count corrections by status."""
+    result = await db.execute(
+        select(MasterDataCorrection.status, func.count(MasterDataCorrection.id))
+        .group_by(MasterDataCorrection.status)
+    )
+    counts = {row[0]: row[1] for row in result.all()}
+    return {
+        "pending": counts.get("pending", 0),
+        "approved": counts.get("approved", 0),
+        "rejected": counts.get("rejected", 0),
+    }
+
+
+@router.post("/corrections", status_code=201)
+async def create_correction(
+    data: CorrectionCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Submit a master data correction request."""
+    if data.field_name not in CORRECTABLE_FIELDS:
+        raise HTTPException(status_code=400, detail=f"Field '{data.field_name}' is not correctable. Allowed: {CORRECTABLE_FIELDS}")
+
+    # Look up current value from master data if old_value not provided
+    old_value = data.old_value
+    if old_value is None:
+        part_result = await db.execute(
+            select(MainiPart).where(func.lower(MainiPart.customer_part_no) == data.customer_part_no.strip().lower())
+        )
+        part = part_result.scalar_one_or_none()
+        if part:
+            old_value = str(getattr(part, data.field_name, "") or "")
+
+    correction = MasterDataCorrection(
+        customer_part_no=data.customer_part_no.strip(),
+        customer_name=data.customer_name,
+        field_name=data.field_name,
+        old_value=old_value,
+        new_value=data.new_value.strip(),
+        reason=data.reason,
+        requested_by=current_user.id,
+        status="pending",
+    )
+    db.add(correction)
+    await db.flush()
+    logger.info(f"Correction request #{correction.id}: {data.customer_part_no}.{data.field_name} → '{data.new_value}' by user {current_user.email}")
+    return {"id": correction.id, "detail": "Correction request submitted"}
+
+
+@router.put("/corrections/{correction_id}/review")
+async def review_correction(
+    correction_id: int,
+    data: CorrectionReview,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.ADMIN)),
+):
+    """Approve or reject a correction request (Admin only).
+
+    On approval, automatically updates the corresponding MainiPart record.
+    """
+    if data.status not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="Status must be 'approved' or 'rejected'")
+
+    result = await db.execute(select(MasterDataCorrection).where(MasterDataCorrection.id == correction_id))
+    correction = result.scalar_one_or_none()
+    if not correction:
+        raise HTTPException(status_code=404, detail="Correction not found")
+    if correction.status != "pending":
+        raise HTTPException(status_code=400, detail=f"Correction is already '{correction.status}'")
+
+    correction.status = data.status
+    correction.reviewed_by = current_user.id
+    correction.reviewed_at = datetime.now(timezone.utc)
+    correction.review_notes = data.review_notes
+
+    if data.status == "approved":
+        # Apply the correction to the MainiPart record
+        part_result = await db.execute(
+            select(MainiPart).where(func.lower(MainiPart.customer_part_no) == correction.customer_part_no.strip().lower())
+        )
+        part = part_result.scalar_one_or_none()
+        if part:
+            field = correction.field_name
+            new_val = correction.new_value
+            # Cast to correct type for numeric fields
+            if field == "unit_price":
+                try:
+                    setattr(part, field, float(new_val))
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"Invalid numeric value for unit_price: '{new_val}'")
+            else:
+                setattr(part, field, new_val)
+            logger.info(f"Correction #{correction_id} applied: {correction.customer_part_no}.{field} = '{new_val}'")
+        else:
+            logger.warning(f"Correction #{correction_id} approved but part '{correction.customer_part_no}' not found in master data")
+
+    await db.flush()
+    return {"detail": f"Correction {data.status}", "id": correction_id}
+
+
+@router.delete("/corrections/{correction_id}")
+async def delete_correction(
+    correction_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.ADMIN)),
+):
+    """Delete a correction request (Admin only)."""
+    result = await db.execute(select(MasterDataCorrection).where(MasterDataCorrection.id == correction_id))
+    correction = result.scalar_one_or_none()
+    if not correction:
+        raise HTTPException(status_code=404, detail="Correction not found")
+    await db.delete(correction)
+    await db.flush()
+    return {"detail": "Deleted"}

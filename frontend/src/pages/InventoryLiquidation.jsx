@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { Package, Layers, Upload, Download, Filter, RefreshCw, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react'
-import { fetchInventorySummary, uploadStockFile, runAllocation, fetchAllocations, fetchAllocationDetail } from '../services/api'
+import { Package, Layers, Upload, Download, Filter, RefreshCw, CheckCircle2, AlertCircle, Loader2, Trash2 } from 'lucide-react'
+import { fetchInventorySummary, uploadStockFile, runAllocation, fetchAllocations, fetchAllocationDetail, deleteStock, deleteAllocations } from '../services/api'
 
 const TABS = [
   { id: 'fg', label: 'FG Allocation' },
@@ -105,6 +105,7 @@ function FGAllocation({ onRefresh }) {
   const [allocating, setAllocating] = useState(false)
   const [allocResult, setAllocResult] = useState(null)
   const [error, setError] = useState('')
+  const [clearing, setClearing] = useState(false)
   const inhouseRef = useRef(null)
   const warehouseRef = useRef(null)
 
@@ -136,6 +137,23 @@ function FGAllocation({ onRefresh }) {
     }
   }
 
+  const handleClearAll = async () => {
+    if (!window.confirm('Delete all FG stock data and allocation results? This cannot be undone.')) return
+    setClearing(true)
+    try {
+      await deleteStock('fg_inhouse')
+      await deleteStock('fg_warehouse')
+      await deleteAllocations()
+      setAllocResult(null)
+      setUploadResults({})
+      onRefresh()
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message)
+    } finally {
+      setClearing(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -143,17 +161,28 @@ function FGAllocation({ onRefresh }) {
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Finished Goods Allocation</h2>
             <p className="text-sm text-gray-500">
-              Fetch SAP reports for in-house FG stock and allocate against demand
+              Upload SAP FG stock report and allocate against demand
             </p>
           </div>
-          <button
-            onClick={handleAllocate}
-            disabled={allocating}
-            className="flex items-center gap-2 px-3 py-2 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-          >
-            {allocating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-            Run Allocation
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleClearAll}
+              disabled={clearing}
+              title="Delete all FG stock & allocation data"
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50"
+            >
+              {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              Clear All
+            </button>
+            <button
+              onClick={handleAllocate}
+              disabled={allocating}
+              className="flex items-center gap-2 px-3 py-2 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+            >
+              {allocating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              Run Allocation
+            </button>
+          </div>
         </div>
 
         {error && <div className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">{error}</div>}
@@ -289,6 +318,7 @@ function WIPAllocation({ onRefresh }) {
   const [allocating, setAllocating] = useState(false)
   const [allocResult, setAllocResult] = useState(null)
   const [error, setError] = useState('')
+  const [clearing, setClearing] = useState(false)
   const fileRef = useRef(null)
 
   const handleUpload = async (e) => {
@@ -321,6 +351,22 @@ function WIPAllocation({ onRefresh }) {
     }
   }
 
+  const handleClearWIP = async () => {
+    if (!window.confirm('Delete all WIP stock data and WIP allocation results?')) return
+    setClearing(true)
+    try {
+      await deleteStock('wip')
+      await deleteAllocations()
+      setAllocResult(null)
+      setUploadResult(null)
+      onRefresh()
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message)
+    } finally {
+      setClearing(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -330,6 +376,15 @@ function WIPAllocation({ onRefresh }) {
             <p className="text-sm text-gray-500">Allocate complete in-house WIP against demand</p>
           </div>
           <div className="flex gap-2">
+            <button
+              onClick={handleClearWIP}
+              disabled={clearing}
+              title="Delete all WIP stock & allocation data"
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50"
+            >
+              {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              Clear All
+            </button>
             <button
               onClick={() => fileRef.current?.click()}
               className="flex items-center gap-2 px-3 py-2 text-xs font-medium border border-gray-200 rounded-lg hover:bg-gray-50"

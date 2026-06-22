@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import {
   Upload, FileSpreadsheet, FileText, Image, File, Trash2, RefreshCw,
   CheckCircle2, XCircle, Clock, Loader2, Eye, ChevronDown, ChevronUp,
-  Sparkles, Search
+  Sparkles, Search, Mail
 } from 'lucide-react'
 import { uploadDocument, fetchUploads, processUpload, deleteUpload, fetchAttachmentRawData } from '../services/api'
 
@@ -11,6 +11,8 @@ const FILE_ICONS = {
   excel: FileSpreadsheet,
   csv: FileSpreadsheet,
   image: Image,
+  email_msg: Mail,
+  email_eml: Mail,
   unknown: File,
 }
 
@@ -111,7 +113,8 @@ export default function UploadDocument() {
       const entries = res.data || []
       const allRows = []
       for (const entry of entries) {
-        const rows = entry.extracted_data?.rows || []
+        const extracted = entry.extracted_data || {}
+        const rows = extracted.rows || []
         allRows.push(...rows)
       }
       setRawData((prev) => ({ ...prev, [id]: allRows }))
@@ -196,15 +199,15 @@ export default function UploadDocument() {
                 Drop files here or click to upload
               </p>
               <p className="text-xs text-gray-500 mt-2">
-                Supports: <span className="font-medium">.pdf</span>, <span className="font-medium">.xlsx</span>, <span className="font-medium">.xls</span>, <span className="font-medium">.csv</span>, <span className="font-medium">.png</span>, <span className="font-medium">.jpg</span>, <span className="font-medium">.tiff</span>
+                Supports: <span className="font-medium">.pdf</span>, <span className="font-medium">.xlsx</span>, <span className="font-medium">.xls</span>, <span className="font-medium">.csv</span>, <span className="font-medium">.slk</span>, <span className="font-medium">.msg</span>, <span className="font-medium">.eml</span>, <span className="font-medium">.png</span>, <span className="font-medium">.jpg</span>, <span className="font-medium">.tiff</span>
               </p>
-              <p className="text-xs text-gray-400 mt-1">Files are auto-processed with AI column mapping</p>
+              <p className="text-xs text-gray-400 mt-1">Email files (.msg/.eml) are unpacked — attachments inside are auto-extracted and processed</p>
             </>
           )}
           <input
             ref={fileRef}
             type="file"
-            accept=".pdf,.xlsx,.xls,.csv,.png,.jpg,.jpeg,.tiff,.bmp"
+            accept=".pdf,.xlsx,.xls,.csv,.slk,.msg,.eml,.png,.jpg,.jpeg,.tiff,.bmp"
             multiple
             onChange={(e) => handleUpload(Array.from(e.target.files || []))}
             className="hidden"
@@ -299,7 +302,7 @@ export default function UploadDocument() {
           <table className="w-full">
             <thead>
               <tr className="bg-gray-50 border-b border-gray-200">
-                {['File', 'Type', 'Size', 'Rows', 'Status', 'Uploaded', 'Actions'].map((h) => (
+                {['#', 'File', 'Type', 'Size', 'Rows', 'Status', 'Uploaded', 'Actions'].map((h) => (
                   <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-4 py-3 whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -307,14 +310,14 @@ export default function UploadDocument() {
             <tbody>
               {filteredUploads.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-6 py-12 text-center">
+                  <td colSpan={8} className="px-6 py-12 text-center">
                     <Upload size={36} className="mx-auto text-gray-300 mb-3" />
                     <p className="text-sm text-gray-500">No documents uploaded yet</p>
                     <p className="text-xs text-gray-400 mt-1">Upload files above to get started</p>
                   </td>
                 </tr>
               ) : (
-                filteredUploads.map((upload) => {
+                filteredUploads.map((upload, idx) => {
                   const FileIcon = FILE_ICONS[upload.source_type] || File
                   const statusCfg = STATUS_CONFIG[(upload.status || '').toLowerCase()] || STATUS_CONFIG.unprocessed
                   const StatusIcon = statusCfg.icon
@@ -323,6 +326,7 @@ export default function UploadDocument() {
                   return (
                     <Fragment key={upload.id}>
                       <tr className="border-b border-gray-100 hover:bg-gray-50">
+                        <td className="px-4 py-3 text-xs text-gray-400 font-medium w-10">{idx + 1}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <FileIcon size={16} className="text-blue-600 flex-shrink-0" />
@@ -384,7 +388,7 @@ export default function UploadDocument() {
                       {/* Expanded Raw Data Viewer */}
                       {isExpanded && (
                         <tr>
-                          <td colSpan={7} className="p-0">
+                          <td colSpan={8} className="p-0">
                             <RawDataPreview
                               uploadId={upload.id}
                               data={rawData[upload.id]}
@@ -429,7 +433,12 @@ function RawDataPreview({ uploadId, data, loading }) {
     )
   }
 
-  const columns = Object.keys(data[0])
+  const columns = Array.from(
+    data.reduce((set, row) => {
+      Object.keys(row || {}).forEach((k) => set.add(k))
+      return set
+    }, new Set())
+  )
   const totalPages = Math.ceil(data.length / PAGE_SIZE)
   const paginated = data.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 

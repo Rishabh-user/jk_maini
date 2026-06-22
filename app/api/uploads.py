@@ -1,4 +1,6 @@
 import os
+import re
+import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy import select, func
@@ -10,6 +12,7 @@ from app.models.email import Email, EmailStatus, Attachment
 from app.models.data import RawData
 from app.services.file_parser import FileParser
 from app.services.ai_mapping import map_columns_with_ai
+from app.services.email_processor import apply_ai_fallback
 from app.utils.config import get_settings
 from app.utils.security import get_current_user, require_roles
 from app.utils.logging import logger
@@ -17,18 +20,210 @@ from app.utils.logging import logger
 settings = get_settings()
 router = APIRouter(prefix="/uploads", tags=["Document Upload"])
 
+# ── Dynamic Customer Part # detection ────────────────────────────────────────
+# Column names that SUGGEST "customer part number" (any of these words present)
+_PART_COL_HINT_RE = re.compile(
+    r"\b(part|item|ref(?:erence)?|article|component|comp|pièce|piéce|repère)\b"
+    r"|p[./]?n\.?",   # P/N, P.N., PN — not word-bounded because of special chars
+    re.IGNORECASE,
+)
+# Column names that EXCLUDE a part-hint (the column is something else even if name has "part/item")
+_PART_COL_EXCLUDE_RE = re.compile(
+    r"desc|cost|price|date|qty|quantity|type|status|name|uom|unit|"
+    r"comment|remark|version|revision|seq|line|order|po\b|extended|"
+    r"drawing|dwg|config|program|buyer|supplier(?!.*(part|item))",
+    re.IGNORECASE,
+)
+
+# Matches column names that represent date/period forecast buckets:
+#   ISO dates   : "2026-10-26", "2026-10-26 00:00:00"  (SAP weekly columns)
+#   Month-year  : "Aug. 2025", "Sep 2025", "August 2025"  (ASCO monthly columns)
+_DATE_COL_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}")
+_MONTH_COL_RE = re.compile(
+    r"^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{4}$",
+    re.I,
+)
+
+
+def _compute_row_id(row: dict, index: int) -> str:
+    """Compute a deterministic UUID5 for a demand row.
+
+    Based on the natural business key (customer part, PO number, delivery date,
+    customer name) so the *same logical row* gets the *same UUID* even when
+    the file is re-uploaded.  This enables change-tracking across versions:
+    v1 and v2 share the same row_id → you can see which field changed.
+
+    When all key fields are empty (e.g. a metadata-only row) the row index is
+    incorporated to prevent UUID collision.
+    """
+    key = "|".join([
+        str(row.get("Customer Part #", "") or "").strip().lower(),
+        str(row.get("PO Number", "") or "").strip().lower(),
+        str(row.get("Delivery Date", "") or "").strip(),
+        str(row.get("Customer Name", "") or "").strip().lower(),
+    ])
+    if not key.replace("|", "").strip():
+        key = f"__empty_row_{index}__"
+    return str(_uuid.uuid5(_uuid.NAMESPACE_URL, key))
+
+
+def _looks_like_part_number(value) -> bool:
+    """Return True if a cell value looks like a customer part number rather than
+    an SAP line sequence (10, 20, 30…) or other non-part numeric field.
+
+    Part numbers typically:
+    - Contain hyphens  (e.g. 307-936-702-0, C-SN-1234-00, EN4561B06-1)
+    - OR contain letters mixed with digits (e.g. 9111M74P01, MS9197-04)
+    - OR are long alphanumeric codes (> 6 chars with no spaces)
+
+    SAP line sequences are pure short integers: 10, 20, 30 … 990.
+    """
+    s = str(value or "").strip()
+    if not s or s.lower() in ("nan", "none", ""):
+        return False
+    # Pure integer ≤ 4 digits → SAP line sequence / line number, NOT a part number
+    if re.fullmatch(r"\d{1,4}", s):
+        return False
+    # Contains a hyphen → almost certainly a part number
+    if "-" in s:
+        return True
+    # Contains both letters and digits (alphanumeric part code)
+    if re.search(r"[A-Za-z]", s) and re.search(r"\d", s):
+        return True
+    # Long pure-numeric string (≥ 7 digits) — could be a part code
+    if re.fullmatch(r"\d{7,}", s):
+        return True
+    return False
+
+
+def _col_hints_at_part(col_name: str) -> bool:
+    """Return True if a column name looks like it holds customer part numbers.
+
+    Uses module-level _PART_COL_HINT_RE / _PART_COL_EXCLUDE_RE so the check is
+    driven by word-level rules, not a hardcoded list of column names.
+
+    Examples that return True:  "Part", "Item", "Item No", "P/N", "Reference",
+                                 "Component", "Comp Part", "Article", "Part No."
+    Examples that return False: "Item Description", "Item Cost", "Part Description",
+                                 "Item Type", "Order Date", "PO", "Line"
+    """
+    name = str(col_name).strip()
+    return bool(_PART_COL_HINT_RE.search(name)) and not bool(_PART_COL_EXCLUDE_RE.search(name))
+
+
+def _build_mapped_rows(
+    raw_rows: list[dict],
+    column_mapping: dict,
+    file_metadata: dict,
+) -> list[dict]:
+    """Map raw extracted rows to system column names.
+
+    Rules:
+    - UNMAPPED columns are skipped, EXCEPT:
+        a) Date-like column headers → collected into forecast_schedule {date: qty}.
+        b) Ambiguous columns (e.g. "Item") whose VALUES look like part numbers →
+           used as Customer Part # fallback when no other part # was found.
+    - First non-empty write wins (prevents later columns clobbering earlier ones
+      that map to the same target, e.g. PO VERSION overwriting PURCHASE ORDER).
+    - customer_name from file_metadata is injected if not already in the row.
+    - A deterministic _row_id (UUID5) is stamped on every row for change-tracking.
+
+    Ambiguous-column note:
+    "Item" in SAP = line sequence (10, 20, 30 …) → UNMAPPED.
+    "Item" in Safran HAL PO = customer part number (307-936-702-0) → should be Customer Part #.
+    We detect the difference by inspecting the cell values at row-build time.
+    """
+    mapped_data = []
+    for i, row in enumerate(raw_rows):
+        mapped_row: dict = {}
+        # Collect UNMAPPED cells that might be part numbers (for fallback below)
+        unmapped_part_candidates: list[tuple[str, object]] = []
+
+        for src_col, value in row.items():
+            # Date-bucket columns come from forecast files where each date/period header
+            # represents a demand quantity for that week/month.
+            # Handles: ISO dates ("2026-10-26"), month-year ("Aug. 2025", "Sep 2025").
+            src_str = str(src_col).strip()
+            # Delivery-schedule / forecast files carry a "Type" column (PO vs Fcst)
+            # that distinguishes firm purchase orders from forecast demand. Preserve
+            # it so the ZSO builder can label each line correctly.
+            if src_str.lower() == "type" and str(value).strip():
+                mapped_row.setdefault("_demand_type", str(value).strip())
+                continue
+            if _DATE_COL_RE.match(src_str) or _MONTH_COL_RE.match(src_str):
+                try:
+                    qty = float(str(value).replace(",", "").strip())
+                    if qty > 0:
+                        if "forecast_schedule" not in mapped_row:
+                            mapped_row["forecast_schedule"] = {}
+                        # ISO dates → first 10 chars (YYYY-MM-DD); month-year kept as-is
+                        date_key = src_str[:10] if _DATE_COL_RE.match(src_str) else src_str
+                        mapped_row["forecast_schedule"][date_key] = qty
+                except (ValueError, TypeError):
+                    pass
+                continue
+
+            target_col = column_mapping.get(src_col, src_col)
+            if target_col == "UNMAPPED":
+                # Stash for part-number fallback — check value after the full row is mapped
+                unmapped_part_candidates.append((src_col, value))
+                continue
+
+            # First-write wins — don't overwrite an already-set non-empty value
+            if target_col in mapped_row and mapped_row[target_col] not in ("", None):
+                continue
+            mapped_row[target_col] = value
+
+        # ── Customer Part # fallback ─────────────────────────────────────────
+        # If no Customer Part # was mapped (e.g. Safran HAL PO "Item" column,
+        # or any file with "Part", "P/N", "Component", "Reference", etc.),
+        # detect it dynamically by checking UNMAPPED column names + cell values.
+        #
+        # Pass 1 — column name hints at part number AND value looks like one
+        #           (e.g. "Item" → "307-936-702-0", "Part" → "649-481-136-0")
+        # Pass 2 — broader: any UNMAPPED column with a part-number-like value
+        #           (catches exotic/unlabelled columns)
+        if not mapped_row.get("Customer Part #"):
+            # Pass 1: name-guided
+            for src_col, value in unmapped_part_candidates:
+                if _col_hints_at_part(str(src_col)) and _looks_like_part_number(value):
+                    mapped_row["Customer Part #"] = value
+                    logger.debug(f"Part# fallback (name hint): col='{src_col}' → '{value}'")
+                    break
+            # Pass 2: value-guided (broader sweep)
+            if not mapped_row.get("Customer Part #"):
+                for src_col, value in unmapped_part_candidates:
+                    if _looks_like_part_number(value):
+                        mapped_row["Customer Part #"] = value
+                        logger.debug(f"Part# fallback (value scan): col='{src_col}' → '{value}'")
+                        break
+
+        # Inject customer name from file-level metadata when not present in the row
+        if not mapped_row.get("Customer Name") and file_metadata.get("customer_name"):
+            mapped_row["Customer Name"] = file_metadata["customer_name"]
+
+        # Stamp deterministic row ID — must be after Customer Name injection
+        # so the ID incorporates the final customer name value
+        mapped_row["_row_id"] = _compute_row_id(mapped_row, i)
+
+        mapped_data.append(mapped_row)
+    return mapped_data
+
 ALLOWED_EXTENSIONS = {
-    "pdf", "xlsx", "xls", "csv",
-    "png", "jpg", "jpeg", "tiff", "bmp",
+    "pdf", "xlsx", "xls", "csv", "slk",
+    "png", "jpg", "jpeg", "tiff", "bmp", "gif", "webp",
+    "msg", "eml", "html", "htm",
 }
 
 
 def _get_source_type(filename: str) -> str:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     type_map = {
-        "pdf": "pdf", "xlsx": "excel", "xls": "excel", "csv": "csv",
+        "pdf": "pdf", "xlsx": "excel", "xls": "excel", "csv": "csv", "slk": "excel",
         "png": "image", "jpg": "image", "jpeg": "image",
-        "tiff": "image", "bmp": "image",
+        "tiff": "image", "bmp": "image", "gif": "image", "webp": "image",
+        "msg": "email_msg", "eml": "email_eml",
+        "html": "email_body", "htm": "email_body",
     }
     return type_map.get(ext, "unknown")
 
@@ -43,6 +238,14 @@ async def upload_document(
     """Upload a document manually (PDF, Excel, CSV, Image) and optionally process it."""
     filename = file.filename or "unknown"
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    # Reject Microsoft Office temp/lock files (e.g. "~$Report.xlsx") — they hold no
+    # data and would just produce a confusing 0-row result.
+    if os.path.basename(filename).startswith("~$"):
+        raise HTTPException(
+            status_code=400,
+            detail="This is a temporary Office lock file (~$…), not a real document. Upload the actual file.",
+        )
 
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -98,21 +301,18 @@ async def upload_document(
     if process:
         try:
             extracted = FileParser.parse(file_path, file.content_type)
+            extracted = await apply_ai_fallback(extracted, filename=filename, file_path=file_path)
             columns = extracted.get("columns", [])
+            file_metadata = extracted.get("file_metadata", {})
 
             column_mapping = {}
             mapped_data = extracted.get("rows", [])
 
             if columns:
                 column_mapping = await map_columns_with_ai(columns)
-                mapped_data = []
-                for row in extracted.get("rows", []):
-                    mapped_row = {}
-                    for src_col, value in row.items():
-                        target_col = column_mapping.get(src_col, src_col)
-                        if target_col != "UNMAPPED":
-                            mapped_row[target_col] = value
-                    mapped_data.append(mapped_row)
+                mapped_data = _build_mapped_rows(
+                    extracted.get("rows", []), column_mapping, file_metadata
+                )
 
             raw = RawData(
                 attachment_id=attachment.id,
@@ -176,21 +376,20 @@ async def process_upload(
     try:
         for attachment in attachments:
             extracted = FileParser.parse(attachment.file_path, attachment.content_type)
+            extracted = await apply_ai_fallback(
+                extracted, filename=attachment.filename, file_path=attachment.file_path
+            )
             columns = extracted.get("columns", [])
+            file_metadata = extracted.get("file_metadata", {})
 
             column_mapping = {}
             mapped_data = extracted.get("rows", [])
 
             if columns:
                 column_mapping = await map_columns_with_ai(columns)
-                mapped_data = []
-                for row in extracted.get("rows", []):
-                    mapped_row = {}
-                    for src_col, value in row.items():
-                        target_col = column_mapping.get(src_col, src_col)
-                        if target_col != "UNMAPPED":
-                            mapped_row[target_col] = value
-                    mapped_data.append(mapped_row)
+                mapped_data = _build_mapped_rows(
+                    extracted.get("rows", []), column_mapping, file_metadata
+                )
 
             raw = RawData(
                 attachment_id=attachment.id,

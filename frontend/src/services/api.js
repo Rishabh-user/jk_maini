@@ -48,9 +48,10 @@ export const fetchDashboardStats = () => api.get('/dashboard/stats')
 export const fetchRecentActivity = () => api.get('/dashboard/recent-activity')
 
 // ─── Emails ──────────────────────────────────
-export const fetchEmails = (skip = 0, limit = 50, status) => {
+export const fetchEmails = (skip = 0, limit = 50, status, includeManual = false) => {
   const params = { skip, limit }
   if (status) params.status = status
+  if (includeManual) params.include_manual = true
   return api.get('/emails/', { params })
 }
 export const fetchEmailById = (id) => api.get(`/emails/${id}`)
@@ -85,8 +86,12 @@ export const generateZSO = (emailId) =>
   api.post('/zso/generate', { email_id: emailId })
 export const fetchZSOReports = () => api.get('/zso/')
 export const fetchZSOById = (id) => api.get(`/zso/${id}`)
-export const exportZSO = (id) =>
-  api.post(`/zso/export/${id}`, {}, { responseType: 'blob' })
+export const exportZSO = (id, visibleColumns = null) =>
+  api.post(
+    `/zso/export/${id}`,
+    visibleColumns ? visibleColumns : null,   // send column list as JSON body when provided
+    { responseType: 'blob' }
+  )
 export const mapColumns = (sourceColumns) =>
   api.post('/zso/map-columns', { source_columns: sourceColumns })
 
@@ -102,6 +107,21 @@ export const uploadDemandFile = (file, uploadType) => {
   })
 }
 export const fetchDemandReports = () => api.get('/demand/reports')
+export const fetchComparableReports = (reportId) => api.get(`/demand/comparable/${reportId}`)
+export const fetchFollowups = (currentId, previousId) =>
+  api.get('/demand/followups', { params: { current_report_id: currentId, previous_report_id: previousId } })
+export const createFollowup = (payload) => api.post('/demand/followups', payload)
+export const updateFollowup = (id, payload) => api.patch(`/demand/followups/${id}`, payload)
+export const deleteFollowup = (id) => api.delete(`/demand/followups/${id}`)
+export const fetchDemandUploads = (type) => api.get('/demand/uploads', { params: type ? { upload_type: type } : {} })
+export const previewDemandUpload = (id) => api.get(`/demand/uploads/${id}/preview`)
+export const deleteDemandUpload = (id) => api.delete(`/demand/uploads/${id}`)
+
+export const fetchCorrections = (status) => api.get('/demand/corrections', { params: status ? { status } : {} })
+export const fetchCorrectionStats = () => api.get('/demand/corrections/stats')
+export const createCorrection = (data) => api.post('/demand/corrections', data)
+export const reviewCorrection = (id, data) => api.put(`/demand/corrections/${id}/review`, data)
+export const deleteCorrection = (id) => api.delete(`/demand/corrections/${id}`)
 
 // ─── Inventory & Liquidation ────────────────
 export const fetchInventorySummary = () => api.get('/inventory/summary')
@@ -119,6 +139,9 @@ export const runAllocation = (allocationType, zsoReportId) => {
 }
 export const fetchAllocations = () => api.get('/inventory/allocations')
 export const fetchAllocationDetail = (id) => api.get(`/inventory/allocations/${id}`)
+export const deleteStock = (stockType) =>
+  api.delete('/inventory/stock', { params: stockType ? { stock_type: stockType } : {} })
+export const deleteAllocations = () => api.delete('/inventory/allocations')
 
 // ─── Coverage Report ────────────────────────
 export const generateCoverage = (allocationId) => {
@@ -171,5 +194,25 @@ export const fetchUploads = (skip = 0, limit = 50) =>
   api.get(`/uploads/documents?skip=${skip}&limit=${limit}`)
 export const deleteUpload = (uploadId) =>
   api.delete(`/uploads/document/${uploadId}`)
+
+// ─── Forex Rates ──────────────────────────
+export const fetchForexRates = () => api.get('/forex/')
+export const fetchCurrentForexRates = () => api.get('/forex/current')
+export const addForexRate = (data) => api.post('/forex/', data)
+export const deleteForexRate = (id) => api.delete(`/forex/${id}`)
+
+// ─── Internal Forecast Data ──────────────────
+export const fetchForecastSummary = () => api.get('/forecast-data/summary')
+export const fetchForecastParts = (customer) => api.get('/forecast-data/parts', { params: { customer } })
+export const uploadForecastFile = (file, customerName) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('customer_name', customerName)
+  return api.post('/forecast-data/upload', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+export const deleteForecastCustomer = (customerName) =>
+  api.delete(`/forecast-data/${encodeURIComponent(customerName)}`)
 
 export default api

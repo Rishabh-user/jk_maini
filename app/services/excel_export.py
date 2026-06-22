@@ -9,9 +9,100 @@ from app.utils.logging import logger
 
 settings = get_settings()
 
+COLUMNS_ORDER = [
+    "sr_no", "kas_name", "customer_name", "site_location", "country",
+    "incoterm", "direct_sales_wh_movement", "po_forecast",
+    "category", "sub_category", "cust_part_no", "maini_part_no",
+    "open_qty", "unit_price", "currency", "unit_price_inr",
+    "total_inr", "doc_date", "ship_date", "sales_month",
+    "row_id",   # deterministic UUID — last column, for reference / change-tracking
+]
+DISPLAY_HEADERS = {
+    "sr_no": "S No",
+    "kas_name": "KAS Name",
+    "customer_name": "Customer Name",
+    "site_location": "Site Location",
+    "country": "Country",
+    "incoterm": "Incoterm",
+    "direct_sales_wh_movement": "Direct Sales / WH Movement",
+    "po_forecast": "PO # / Forecast",
+    "category": "Category",
+    "sub_category": "Sub Category",
+    "cust_part_no": "Cust Part #",
+    "maini_part_no": "Maini Part #",
+    "open_qty": "Open Qty",
+    "unit_price": "Unit Price",
+    "currency": "Currency",
+    "unit_price_inr": "Unit Price in INR",
+    "total_inr": "Total in INR",
+    "doc_date": "Doc Date",
+    "ship_date": "Ship Date",
+    "sales_month": "Sales Month",
+    "row_id": "UUID",
+}
 
-def export_zso_to_excel(zso_data: dict, output_dir: str | None = None) -> str:
-    """Generate a formatted Excel file from ZSO report data."""
+
+def _is_forecast_label(po_value) -> bool:
+    v = str(po_value or "").strip()
+    return bool(v) and not v.replace("-", "").replace("/", "").isdigit()
+
+
+def _month_label(date_str: str) -> str:
+    if not date_str:
+        return ""
+    try:
+        from dateutil import parser as dp
+        return dp.parse(str(date_str)).strftime("%b-%Y")
+    except Exception:
+        return ""
+
+
+def _expand_forecast_rows(items: list[dict]) -> list[dict]:
+    """Expand forecast rows that carry a forecast_schedule into one row per
+    date+quantity entry so the full schedule appears in the exported file.
+    Non-forecast rows and forecast rows without schedule data pass through unchanged.
+    """
+    expanded: list[dict] = []
+    sr = 0
+
+    for item in items:
+        po = str(item.get("po_forecast", "") or "").strip()
+        schedule: dict = item.get("forecast_schedule") or {}
+
+        if _is_forecast_label(po) and schedule:
+            unit_price = float(item.get("unit_price") or 0)
+            for date_str in sorted(schedule.keys()):
+                qty = float(schedule[date_str])
+                if qty <= 0:
+                    continue
+                sr += 1
+                row = {k: v for k, v in item.items() if k != "forecast_schedule"}
+                row["sr_no"] = sr
+                row["ship_date"] = date_str
+                row["open_qty"] = qty
+                row["sales_month"] = _month_label(date_str)
+                row["unit_price_inr"] = round(unit_price, 2)
+                row["total_inr"] = round(qty * unit_price, 2)
+                expanded.append(row)
+        else:
+            sr += 1
+            row = {k: v for k, v in item.items() if k != "forecast_schedule"}
+            row["sr_no"] = sr
+            expanded.append(row)
+
+    return expanded
+
+
+def export_zso_to_excel(
+    zso_data: dict,
+    output_dir: str | None = None,
+    visible_columns: list[str] | None = None,
+) -> str:
+    """Generate a formatted Excel file from ZSO report data.
+
+    Forecast rows that carry a forecast_schedule are expanded into one row
+    per date+quantity so the full schedule is visible in the export.
+    """
     output_dir = output_dir or os.path.join(settings.UPLOAD_DIR, "exports")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -19,53 +110,64 @@ def export_zso_to_excel(zso_data: dict, output_dir: str | None = None) -> str:
     filename = f"ZSO_Report_{timestamp}.xlsx"
     filepath = os.path.join(output_dir, filename)
 
-    items = zso_data.get("items", [])
-    if not items:
+    raw_items = zso_data.get("items", [])
+    if not raw_items:
         logger.warning("No items to export")
         return ""
 
-    columns_order = [
-        "sr_no", "kas_name", "customer_name", "site_location", "country",
-        "incoterm", "direct_sales_wh_movement", "po_forecast",
-        "category", "sub_category", "cust_part_no", "maini_part_no",
-        "open_qty", "unit_price", "currency", "unit_price_inr",
-        "total_inr", "doc_date", "ship_date", "sales_month",
-    ]
-    display_headers = {
-        "sr_no": "S No",
-        "kas_name": "KAS Name",
-        "customer_name": "Customer Name",
-        "site_location": "Site Location",
-        "country": "Country",
-        "incoterm": "Incoterm",
-        "direct_sales_wh_movement": "Direct Sales / WH Movement",
-        "po_forecast": "PO # / Forecast",
-        "category": "Category",
-        "sub_category": "Sub Category",
-        "cust_part_no": "Cust Part #",
-        "maini_part_no": "Maini Part #",
-        "open_qty": "Open Qty",
-        "unit_price": "Unit Price",
-        "currency": "Currency",
-        "unit_price_inr": "Unit Price in INR",
-        "total_inr": "Total in INR",
-        "doc_date": "Doc Date",
-        "ship_date": "Ship Date",
-        "sales_month": "Sales Month",
-    }
+    # Expand forecast rows → one row per schedule date+qty
+    items = _expand_forecast_rows(raw_items)
+    forecast_expanded = len(items) - len(raw_items)
+    if forecast_expanded > 0:
+        logger.info(f"Export: expanded forecast rows → {len(items)} total rows (was {len(raw_items)})")
+
+    # Back-fill row_id for reports generated before UUID was introduced.
+    # Uses the same deterministic UUID5 logic as _compute_row_id in uploads.py.
+    import uuid as _uuid
+    for idx, item in enumerate(items):
+        if not item.get("row_id"):
+            key = "|".join([
+                str(item.get("cust_part_no", "") or "").strip().lower(),
+                str(item.get("po_forecast", "") or "").strip().lower(),
+                str(item.get("ship_date", "") or "").strip(),
+                str(item.get("customer_name", "") or "").strip().lower(),
+            ])
+            if not key.replace("|", "").strip():
+                key = f"__empty_row_{idx}__"
+            item["row_id"] = str(_uuid.uuid5(_uuid.NAMESPACE_URL, key))
 
     df = pd.DataFrame(items)
-    df = df[[c for c in columns_order if c in df.columns]]
-    df.rename(columns=display_headers, inplace=True)
+    # Apply column visibility filter if provided (from the frontend Columns panel)
+    if visible_columns:
+        # visible_columns uses frontend camelCase field names → map to snake_case DB keys
+        _frontend_to_backend = {
+            "srNo": "sr_no", "kasName": "kas_name", "customerName": "customer_name",
+            "siteLocation": "site_location", "country": "country", "incoterm": "incoterm",
+            "directSalesWh": "direct_sales_wh_movement", "poForecast": "po_forecast",
+            "category": "category", "subCategory": "sub_category",
+            "custPart": "cust_part_no", "mainiPart": "maini_part_no",
+            "openQty": "open_qty", "unitPrice": "unit_price", "currency": "currency",
+            "unitPriceInr": "unit_price_inr", "totalInr": "total_inr",
+            "docDate": "doc_date", "shipDate": "ship_date", "salesMonth": "sales_month",
+            "rowId": "row_id",
+        }
+        backend_cols = [_frontend_to_backend.get(c, c) for c in visible_columns]
+        # sr_no always first; row_id always last (never filtered out — needed for tracking)
+        middle = [c for c in COLUMNS_ORDER if c not in ("sr_no", "row_id") and c in backend_cols]
+        ordered = ["sr_no"] + middle + ["row_id"]
+    else:
+        ordered = COLUMNS_ORDER
+    df = df[[c for c in ordered if c in df.columns]]
+    df.rename(columns=DISPLAY_HEADERS, inplace=True)
 
     with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
-        # Summary sheet
+        # Summary sheet — reflect the expanded row count
         summary_data = {
-            "Field": ["KAS Name", "Generated At", "Total Items", "Matched Items", "Total INR", "Status"],
+            "Field": ["KAS Name", "Generated At", "Total Rows (exported)", "Matched Items", "Total INR", "Status"],
             "Value": [
                 zso_data.get("kas_name", ""),
                 zso_data.get("generated_at", ""),
-                zso_data.get("total_items", 0),
+                len(items),          # expanded count
                 zso_data.get("matched_items", 0),
                 zso_data.get("total_inr", 0),
                 "Generated",

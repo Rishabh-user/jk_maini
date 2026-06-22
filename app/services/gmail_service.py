@@ -1,5 +1,6 @@
 import base64
 import os
+import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -39,13 +40,31 @@ class GmailService:
                 except Exception as e:
                     logger.warning(f"Could not save refreshed token to file: {e}")
             else:
-                # On production (headless server), we cannot open a browser.
-                # The token.json must be provided via GMAIL_TOKEN_B64 env var.
-                raise RuntimeError(
-                    "Gmail token is missing or invalid and cannot be refreshed. "
-                    "Please re-authenticate locally and update the GMAIL_TOKEN_B64 "
-                    "environment variable on Render with a fresh token."
-                )
+                # Try local browser-based OAuth flow first (dev / local machine).
+                # Falls back to GMAIL_TOKEN_B64 env var for headless production servers.
+                token_b64 = os.environ.get("GMAIL_TOKEN_B64", "").strip()
+                if token_b64:
+                    import base64 as _b64
+                    token_json = _b64.b64decode(token_b64).decode("utf-8")
+                    import tempfile, json as _json
+                    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+                    tmp.write(token_json); tmp.flush(); tmp.close()
+                    creds = Credentials.from_authorized_user_file(tmp.name, self.scopes)
+                    os.unlink(tmp.name)
+                elif os.path.exists(settings.GMAIL_CREDENTIALS_FILE):
+                    logger.info("No valid Gmail token — launching browser OAuth flow...")
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        settings.GMAIL_CREDENTIALS_FILE, self.scopes
+                    )
+                    creds = flow.run_local_server(port=0)
+                    with open(settings.GMAIL_TOKEN_FILE, "w") as token:
+                        token.write(creds.to_json())
+                    logger.info("New Gmail token saved to token.json")
+                else:
+                    raise RuntimeError(
+                        "Gmail token is missing and credentials.json not found. "
+                        "Place credentials.json in the project root or set GMAIL_TOKEN_B64."
+                    )
 
         self.service = build("gmail", "v1", credentials=creds)
         logger.info("Gmail API authenticated successfully")
@@ -82,6 +101,7 @@ class GmailService:
         header_map = {h["name"].lower(): h["value"] for h in headers}
 
         body = self._get_body(message.get("payload", {}))
+        body_html = self._get_html_body(message.get("payload", {}))
         attachments = self._get_attachments(message)
 
         received_at = None
@@ -96,6 +116,7 @@ class GmailService:
             "subject": header_map.get("subject"),
             "sender": header_map.get("from"),
             "body": body,
+            "body_html": body_html,
             "received_at": received_at,
             "attachments": attachments,
         }
@@ -114,28 +135,64 @@ class GmailService:
                     return result
         return ""
 
+    def _get_html_body(self, payload: dict) -> str:
+        """Extract the text/html alternative of the body (preserves tables)."""
+        if payload.get("mimeType") == "text/html" and payload.get("body", {}).get("data"):
+            return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+        for part in payload.get("parts", []):
+            if part.get("mimeType") == "text/html" and part.get("body", {}).get("data"):
+                return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
+            if part.get("parts"):
+                result = self._get_html_body(part)
+                if result:
+                    return result
+        return ""
+
+    def _iter_parts(self, payload: dict):
+        """Recursively yield every MIME part (handles nested multipart/* trees)."""
+        yield payload
+        for part in payload.get("parts", []):
+            yield from self._iter_parts(part)
+
     def _get_attachments(self, message: dict) -> list[dict]:
+        """Collect file attachments AND inline images (screenshots) — recursively.
+
+        Inline images live in nested multipart/related parts and may carry their
+        bytes inline (body.data) rather than via attachmentId; both are handled.
+        """
         attachments = []
-        parts = message.get("payload", {}).get("parts", [])
+        payload = message.get("payload", {})
 
-        for part in parts:
-            filename = part.get("filename")
-            if not filename:
+        for idx, part in enumerate(self._iter_parts(payload)):
+            mime = part.get("mimeType", "") or ""
+            filename = part.get("filename") or ""
+            body = part.get("body", {}) or {}
+            attachment_id = body.get("attachmentId")
+            inline_data = body.get("data")
+
+            is_image = mime.startswith("image/")
+            # Keep: real file attachments (have a filename) OR inline images
+            if not filename and not is_image:
+                continue
+            if not attachment_id and not inline_data:
                 continue
 
-            attachment_id = part.get("body", {}).get("attachmentId")
-            if not attachment_id:
-                continue
+            if attachment_id:
+                att = self.service.users().messages().attachments().get(
+                    userId="me", messageId=message["id"], id=attachment_id
+                ).execute()
+                file_data = base64.urlsafe_b64decode(att["data"])
+            else:
+                file_data = base64.urlsafe_b64decode(inline_data)
 
-            att_data = self.service.users().messages().attachments().get(
-                userId="me", messageId=message["id"], id=attachment_id
-            ).execute()
-
-            file_data = base64.urlsafe_b64decode(att_data["data"])
+            # Synthesize a filename for inline images that lack one
+            if not filename and is_image:
+                ext = mime.split("/")[-1].split("+")[0] or "png"
+                filename = f"inline_image_{idx}.{ext}"
 
             attachments.append({
                 "filename": filename,
-                "content_type": part.get("mimeType"),
+                "content_type": mime,
                 "data": file_data,
                 "size": len(file_data),
             })
@@ -152,6 +209,15 @@ class GmailService:
             body={"removeLabelIds": ["UNREAD"]},
         ).execute()
         logger.info(f"Marked email {message_id} as read")
+
+
+def _safe_filename(name: str) -> str:
+    """Strip path separators and unsafe characters so the name is a single file."""
+    name = (name or "attachment").strip()
+    # Drop any directory components, then replace remaining unsafe chars
+    name = os.path.basename(name.replace("\\", "/").rstrip("/"))
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
+    return name or "attachment"
 
 
 async def save_email_to_db(
@@ -182,18 +248,36 @@ async def save_email_to_db(
     os.makedirs(email_dir, exist_ok=True)
 
     for att_data in email_data.get("attachments", []):
-        file_path = os.path.join(email_dir, att_data["filename"])
+        # Sanitize: attachment filenames can contain '/', '\' or other path
+        # separators (e.g. "Maini // A462884.eml") which would break os.path.join.
+        safe_name = _safe_filename(att_data["filename"])
+        file_path = os.path.join(email_dir, safe_name)
         with open(file_path, "wb") as f:
             f.write(att_data["data"])
 
         attachment = Attachment(
             email_id=email.id,
-            filename=att_data["filename"],
+            filename=att_data["filename"],   # keep original for display
             content_type=att_data["content_type"],
             file_path=file_path,
             file_size=att_data["size"],
         )
         db.add(attachment)
+
+    # Persist the HTML body (preserves tables the plain-text part flattens) so the
+    # processor can extract embedded tables. Saved as a normal attachment file.
+    body_html = (email_data.get("body_html") or "").strip()
+    if body_html:
+        html_path = os.path.join(email_dir, "email_body.html")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(body_html)
+        db.add(Attachment(
+            email_id=email.id,
+            filename="email_body.html",
+            content_type="text/html",
+            file_path=html_path,
+            file_size=os.path.getsize(html_path),
+        ))
 
     await db.flush()
     logger.info(f"Saved email {email.gmail_message_id} with {len(email_data.get('attachments', []))} attachments")

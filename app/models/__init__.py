@@ -1,15 +1,15 @@
 from app.models.user import User, UserRole
 from app.models.email import Email, EmailStatus, Attachment
 from app.models.data import (
-    RawData, MainiPart, ZSOReport,
+    RawData, MainiPart, ZSOReport, ForexRate, ForecastEntry,
     DemandUpload, InventoryStock, AllocationResult,
-    CoverageReport, SalesData, BudgetData,
+    CoverageReport, SalesData, BudgetData, MasterDataCorrection, DemandFollowUp,
 )
 
 __all__ = [
     "User", "UserRole",
     "Email", "EmailStatus", "Attachment",
-    "RawData", "MainiPart", "ZSOReport",
+    "RawData", "MainiPart", "ZSOReport", "ForexRate", "ForecastEntry",
     "DemandUpload", "InventoryStock", "AllocationResult",
-    "CoverageReport", "SalesData", "BudgetData",
+    "CoverageReport", "SalesData", "BudgetData", "MasterDataCorrection", "DemandFollowUp",
 ]

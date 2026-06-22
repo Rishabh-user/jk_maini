@@ -19,6 +19,12 @@ class Settings(BaseSettings):
 
     # Claude AI
     ANTHROPIC_API_KEY: str = ""
+    # Model for column mapping (cheap, structured). Default = the one this app ships with.
+    AI_MODEL: str = "claude-sonnet-4-20250514"
+    # Model for AI-fallback extraction (email bodies, embedded tables, images, scanned PDFs).
+    # Defaults to the same proven model; set to a stronger model (e.g. claude-opus-4-8)
+    # in .env if your API key has access and you want maximum extraction accuracy.
+    EXTRACTION_MODEL: str = "claude-sonnet-4-20250514"
 
     # Tesseract
     TESSERACT_CMD: str = "tesseract"

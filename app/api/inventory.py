@@ -2,7 +2,7 @@ import io
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -10,6 +10,11 @@ from app.models.user import User, UserRole
 from app.models.data import InventoryStock, AllocationResult, ZSOReport
 from app.utils.security import get_current_user, require_roles
 from app.utils.logging import logger
+
+# SAP Open Orders — production order types that represent true WIP
+# YBM5 = standard production order, YBM6/YBM7 = variants
+# YRW3 = rework order — excluded (not new stock, just fixing existing)
+_WIP_VALID_ORDER_TYPES = {"YBM5", "YBM6", "YBM7"}
 
 router = APIRouter(prefix="/inventory", tags=["Inventory & Liquidation"])
 
@@ -128,7 +133,14 @@ async def run_allocation(
     if not zso:
         raise HTTPException(status_code=404, detail="No ZSO report found for allocation")
 
-    demand_items = (zso.report_data or {}).get("items", [])
+    all_items = (zso.report_data or {}).get("items", [])
+
+    # Exclude Internal Forecast rows — they are planning data, not real PO demand.
+    # Allocating stock against forecast would double-count the same WIP pool.
+    demand_items = [
+        item for item in all_items
+        if (item.get("po_forecast") or "").strip().lower() != "internal forecast"
+    ]
 
     # Get stock data
     stock_types = []
@@ -154,6 +166,7 @@ async def run_allocation(
     # Build stock lookup by part number (try common column names)
     stock_by_part = {}
     for row in all_stock_rows:
+        # ── Part number ────────────────────────────────────────────────
         part = (
             row.get("Maini Part No", "") or row.get("maini_part_no", "") or
             row.get("Part No", "") or row.get("Material", "") or
@@ -161,18 +174,52 @@ async def run_allocation(
         ).strip()
         if not part:
             continue
+
+        # ── WIP: skip rework orders (YRW3) — only count real production ──
+        st = row["_stock_type"]
+        if st == "wip":
+            order_type = str(row.get("Order Type", "") or "").strip()
+            if order_type and order_type not in _WIP_VALID_ORDER_TYPES:
+                continue
+
         if part not in stock_by_part:
             stock_by_part[part] = {"fg_inhouse": 0, "fg_warehouse": 0, "wip": 0}
+
+        # ── Quantity ───────────────────────────────────────────────────
+        # Priority order matters:
+        #   "Unrestricted"  → STOCK (1).xlsx   (SAP FG unrestricted stock)
+        #   "Open Qty"      → OPEN ORDERS.xlsx  (SAP open production qty)
+        #   "Qty" / "Stock" / "Quantity" → generic fallbacks
         qty = 0
         try:
             qty_str = (
+                row.get("Unrestricted", "") or    # STOCK file — SAP FG
+                row.get("Open Qty", "") or         # Open Orders file — SAP WIP
                 row.get("Qty", "") or row.get("Stock", "") or
                 row.get("Quantity", "") or row.get("qty", "") or "0"
             )
             qty = float(str(qty_str).replace(",", "")) if qty_str else 0
         except (ValueError, TypeError):
             qty = 0
-        stock_by_part[part][row["_stock_type"]] += qty
+        stock_by_part[part][st] += qty
+
+    # Group demand by Maini Part # so the shared stock pool is allocated once,
+    # not independently per ZSO row (which would double-count WIP).
+    # Multiple PO lines for the same Maini part are summed into one demand figure.
+    from collections import defaultdict
+    grouped: dict[str, dict] = {}
+    for item in demand_items:
+        maini_part = (item.get("maini_part_no") or "").strip()
+        if not maini_part:
+            continue
+        if maini_part not in grouped:
+            grouped[maini_part] = {
+                "maini_part_no": maini_part,
+                "cust_part_no": (item.get("cust_part_no") or item.get("customer_part_no") or "").strip(),
+                "customer": (item.get("customer_name") or "").strip(),
+                "demand_qty": 0.0,
+            }
+        grouped[maini_part]["demand_qty"] += float(item.get("open_qty", item.get("quantity", 0)) or 0)
 
     # Allocate
     allocations = []
@@ -180,10 +227,8 @@ async def run_allocation(
     partial = 0
     no_stock = 0
 
-    for item in demand_items:
-        cust_part = item.get("cust_part_no", item.get("customer_part_no", ""))
-        maini_part = item.get("maini_part_no", "")
-        demand_qty = float(item.get("open_qty", item.get("quantity", 0)) or 0)
+    for maini_part, grp in grouped.items():
+        demand_qty = grp["demand_qty"]
 
         stock_info = stock_by_part.get(maini_part, {"fg_inhouse": 0, "fg_warehouse": 0, "wip": 0})
         fg_inhouse = stock_info.get("fg_inhouse", 0)
@@ -191,7 +236,10 @@ async def run_allocation(
         wip_qty = stock_info.get("wip", 0)
 
         total_fg = fg_inhouse + fg_warehouse
-        total_available = total_fg + wip_qty if allocation_type == "combined" else (total_fg if allocation_type == "fg" else wip_qty)
+        total_available = (
+            total_fg + wip_qty if allocation_type == "combined"
+            else (total_fg if allocation_type == "fg" else wip_qty)
+        )
         allocated = min(demand_qty, total_available)
         gap = demand_qty - allocated
 
@@ -206,9 +254,9 @@ async def run_allocation(
             no_stock += 1
 
         allocations.append({
-            "cust_part_no": cust_part,
+            "cust_part_no": grp["cust_part_no"],
             "maini_part_no": maini_part,
-            "customer": item.get("customer_name", ""),
+            "customer": grp["customer"],
             "demand_qty": demand_qty,
             "fg_inhouse": fg_inhouse,
             "fg_warehouse": fg_warehouse,
@@ -243,6 +291,39 @@ async def run_allocation(
         "summary": summary,
         "allocations": allocations,
     }
+
+
+@router.delete("/stock")
+async def delete_stock(
+    stock_type: str = Query(None, description="Delete only this stock type: fg_inhouse, fg_warehouse, wip. Omit to delete ALL."),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.ADMIN)),
+):
+    """Delete uploaded stock data. Pass stock_type to delete one type, or omit to wipe all."""
+    if stock_type:
+        if stock_type not in ("fg_inhouse", "fg_warehouse", "wip"):
+            raise HTTPException(status_code=400, detail="Invalid stock_type")
+        result = await db.execute(delete(InventoryStock).where(InventoryStock.stock_type == stock_type))
+        deleted = result.rowcount
+        logger.info(f"Deleted {deleted} stock records of type={stock_type} by {current_user.email}")
+        return {"deleted": deleted, "stock_type": stock_type}
+    else:
+        result = await db.execute(delete(InventoryStock))
+        deleted = result.rowcount
+        logger.info(f"Deleted ALL {deleted} stock records by {current_user.email}")
+        return {"deleted": deleted, "stock_type": "all"}
+
+
+@router.delete("/allocations")
+async def delete_allocations(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.ADMIN)),
+):
+    """Delete all allocation results."""
+    result = await db.execute(delete(AllocationResult))
+    deleted = result.rowcount
+    logger.info(f"Deleted ALL {deleted} allocation records by {current_user.email}")
+    return {"deleted": deleted}
 
 
 @router.get("/allocations")
