@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import os
 import re
 from datetime import datetime, timezone
@@ -261,6 +262,7 @@ async def save_email_to_db(
             content_type=att_data["content_type"],
             file_path=file_path,
             file_size=att_data["size"],
+            file_hash=hashlib.sha256(att_data["data"]).hexdigest(),
         )
         db.add(attachment)
 

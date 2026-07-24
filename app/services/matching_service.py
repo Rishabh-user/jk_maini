@@ -17,7 +17,9 @@ async def match_with_maini_parts(
     enriched_rows = []
 
     for row in mapped_rows:
-        customer_part = row.get("Customer Part #", "").strip()
+        # Part numbers can be numeric in some files (e.g. 297029) → coerce to str
+        # before string ops, otherwise int.strip() raises AttributeError.
+        customer_part = str(row.get("Customer Part #", "") or "").strip()
         if not customer_part:
             row["_match_status"] = "no_customer_part"
             enriched_rows.append(row)

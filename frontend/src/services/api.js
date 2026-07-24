@@ -86,6 +86,8 @@ export const generateZSO = (emailId) =>
   api.post('/zso/generate', { email_id: emailId })
 export const fetchZSOReports = () => api.get('/zso/')
 export const fetchZSOById = (id) => api.get(`/zso/${id}`)
+export const fetchReportVersions = (reportId) => api.get(`/zso/${reportId}/versions`)
+export const fetchVersionChanges = (versionId) => api.get(`/zso/versions/${versionId}/changes`)
 export const exportZSO = (id, visibleColumns = null) =>
   api.post(
     `/zso/export/${id}`,
@@ -137,6 +139,12 @@ export const runAllocation = (allocationType, zsoReportId) => {
   if (zsoReportId) params.append('zso_report_id', zsoReportId)
   return api.post(`/inventory/allocate?${params.toString()}`)
 }
+export const fetchFgLiquidation = (zsoReportId, scope = 'report') => {
+  const params = { scope }
+  if (zsoReportId) params.zso_report_id = zsoReportId
+  return api.get('/inventory/fg-liquidation', { params })
+}
+export const fetchVmiSafety = () => api.get('/inventory/vmi-safety')
 export const fetchAllocations = () => api.get('/inventory/allocations')
 export const fetchAllocationDetail = (id) => api.get(`/inventory/allocations/${id}`)
 export const deleteStock = (stockType) =>
@@ -181,10 +189,10 @@ export const fetchPerformanceKPIs = (fiscalYear) =>
   api.get(`/performance/kpis?fiscal_year=${fiscalYear}`)
 
 // ─── Document Upload ───────────────────────
-export const uploadDocument = (file, autoProcess = true) => {
+export const uploadDocument = (file, autoProcess = true, force = false) => {
   const formData = new FormData()
   formData.append('file', file)
-  return api.post(`/uploads/document?process=${autoProcess}`, formData, {
+  return api.post(`/uploads/document?process=${autoProcess}&force=${force}`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }

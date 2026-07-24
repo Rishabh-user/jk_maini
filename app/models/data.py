@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import String, Text, Integer, Float, DateTime, ForeignKey, JSON, func
+from sqlalchemy import String, Text, Integer, Float, Boolean, DateTime, ForeignKey, JSON, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -28,17 +28,61 @@ class MainiPart(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     customer_name: Mapped[str | None] = mapped_column(String(255))
     customer_location: Mapped[str | None] = mapped_column(String(255))
+    sold_to_party: Mapped[str | None] = mapped_column(String(255))
+    ship_to_party: Mapped[str | None] = mapped_column(String(255))
     customer_part_no: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     maini_part_no: Mapped[str | None] = mapped_column(String(255), index=True)
     description: Mapped[str | None] = mapped_column(Text)
     country: Mapped[str | None] = mapped_column(String(100))
     unit_price: Mapped[float | None] = mapped_column(Float)
     currency: Mapped[str | None] = mapped_column(String(10), default="INR")
+    incoterm: Mapped[str | None] = mapped_column(String(50))
     hsn_code: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class ReportVersion(Base):
+    """A version in a report's history chain. Snapshot-preserving: each version
+    points to a full ZSOReport; the deltas live in ReportChange. Chains group
+    re-uploads of the same logical demand (matched by part-number overlap, so
+    adding/removing individual POs stays within the chain as V2/V3…)."""
+    __tablename__ = "report_versions"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    demand_doc_key: Mapped[str] = mapped_column(String(128), index=True)   # stable chain id (assigned at V1)
+    version_number: Mapped[int] = mapped_column(Integer, default=1)
+    zso_report_id: Mapped[int] = mapped_column(Integer, ForeignKey("zso_reports.id"), index=True)  # full snapshot
+    is_base: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str | None] = mapped_column(String(20))                 # manual | email
+    source_email_id: Mapped[int | None] = mapped_column(Integer)
+    doc_class: Mapped[str | None] = mapped_column(String(20))              # PO | FORECAST
+    customer_name: Mapped[str | None] = mapped_column(String(255))
+    total_rows: Mapped[int] = mapped_column(Integer, default=0)
+    added_rows: Mapped[int] = mapped_column(Integer, default=0)
+    removed_rows: Mapped[int] = mapped_column(Integer, default=0)
+    modified_rows: Mapped[int] = mapped_column(Integer, default=0)
+    unchanged_rows: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReportChange(Base):
+    """One field-level delta between a version and the previous version."""
+    __tablename__ = "report_changes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    version_id: Mapped[int] = mapped_column(Integer, ForeignKey("report_versions.id"), index=True)
+    row_key: Mapped[str | None] = mapped_column(String(255), index=True)   # row_id / line identity
+    cust_part_no: Mapped[str | None] = mapped_column(String(255))
+    po_number: Mapped[str | None] = mapped_column(String(120))
+    change_type: Mapped[str] = mapped_column(String(20))                   # added | removed | modified
+    field_name: Mapped[str | None] = mapped_column(String(60))             # null for added/removed
+    old_value: Mapped[str | None] = mapped_column(Text)
+    new_value: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ZSOReport(Base):
@@ -58,6 +102,50 @@ class ZSOReport(Base):
     )
 
     created_by_user: Mapped["User"] = relationship(back_populates="zso_reports")
+
+
+class DemandLine(Base):
+    """Canonical ledger of unique demand lines — the deduplication + version store.
+
+    Each real demand line (PO line, or a forecast part-period) is registered here
+    keyed by its business IDENTITY (line_key). A second fingerprint (content_hash)
+    includes the quantity so we can tell an exact duplicate from a revision:
+      - new line_key            → new demand line (version 1, status 'current')
+      - same line_key + hash    → exact DUPLICATE (from a different source) → logged, not re-added
+      - same line_key, new hash → REVISION → old row marked 'superseded', new row 'current' (version++)
+    Superseded rows are retained for audit / version history.
+    """
+    __tablename__ = "demand_lines"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    line_key: Mapped[str] = mapped_column(String(128), index=True)      # identity fingerprint
+    content_hash: Mapped[str] = mapped_column(String(128), index=True)  # identity + qty (+ price)
+
+    # Business fields (denormalized for display / audit)
+    po_number: Mapped[str | None] = mapped_column(String(120))
+    po_line: Mapped[str | None] = mapped_column(String(60))
+    cust_part_no: Mapped[str | None] = mapped_column(String(255), index=True)
+    maini_part_no: Mapped[str | None] = mapped_column(String(255))
+    customer_name: Mapped[str | None] = mapped_column(String(255))
+    delivery_date: Mapped[str | None] = mapped_column(String(60))
+    period: Mapped[str | None] = mapped_column(String(60))              # forecast bucket, if any
+    quantity: Mapped[float | None] = mapped_column(Float)
+    unit_price: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str | None] = mapped_column(String(10))
+    is_forecast: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Version / dedup bookkeeping
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(20), default="current", index=True)  # current | superseded
+    superseded_by_id: Mapped[int | None] = mapped_column(Integer)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0)     # times this exact line re-arrived
+    source_email_id: Mapped[int | None] = mapped_column(Integer, index=True)  # source of demand (for idempotency)
+    also_seen_in: Mapped[list | None] = mapped_column(JSON)              # provenance of duplicate sources
+
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class DemandFollowUp(Base):

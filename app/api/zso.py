@@ -96,27 +96,29 @@ async def generate_zso(
     from app.services.forecast_service import get_forecast_rows_by_parts, get_forecast_rows_for_zso
 
     # 1. Match forecast by customer part numbers present in demand rows
+    # str(...) coercion: part numbers can be numeric in some files (e.g. 9933200600
+    # as an int) → .strip() on a bare int raises AttributeError.
     demand_part_numbers = list({
-        r.get("Customer Part #", "").strip()
+        str(r.get("Customer Part #", "") or "").strip()
         for r in matched_rows
-        if r.get("Customer Part #", "").strip()
+        if str(r.get("Customer Part #", "") or "").strip()
     })
     forecast_rows = await get_forecast_rows_by_parts(db, demand_part_numbers)
 
     # 2. Fallback: for any customer name in demand, pick up forecast parts NOT already matched
     #    (e.g. forecast parts for this customer that weren't in this specific demand file)
-    already_matched_parts = {r["Customer Part #"].strip().lower() for r in forecast_rows}
+    already_matched_parts = {str(r.get("Customer Part #", "") or "").strip().lower() for r in forecast_rows}
     customer_names_in_demand = list({
-        r.get("Customer Name", "").strip()
+        str(r.get("Customer Name", "") or "").strip()
         for r in matched_rows
-        if r.get("Customer Name", "").strip()
+        if str(r.get("Customer Name", "") or "").strip()
     })
     for cname in customer_names_in_demand:
         extra_rows = await get_forecast_rows_for_zso(db, cname)
-        new_rows = [r for r in extra_rows if r["Customer Part #"].strip().lower() not in already_matched_parts]
+        new_rows = [r for r in extra_rows if str(r.get("Customer Part #", "") or "").strip().lower() not in already_matched_parts]
         if new_rows:
             forecast_rows.extend(new_rows)
-            already_matched_parts.update(r["Customer Part #"].strip().lower() for r in new_rows)
+            already_matched_parts.update(str(r.get("Customer Part #", "") or "").strip().lower() for r in new_rows)
 
     if forecast_rows:
         matched_rows = list(matched_rows) + forecast_rows
@@ -129,12 +131,73 @@ async def generate_zso(
         matched_rows, applied_instructions = apply_instructions(matched_rows, instructions)
         logger.info(f"Applied {len(applied_instructions)} sender instruction(s) to ZSO")
 
+    # ── Duplicate handling ───────────────────────────────────────────────────
+    # (1) Drop exact-duplicate lines within this report (e.g. same PO as PDF+Excel).
+    # (2) Register every line in the demand-line ledger for cross-source duplicate
+    #     detection + version history (revisions auto-supersede, retained for audit).
+    # Wrapped defensively — dedup must never break ZSO generation.
+    dedup_summary: dict = {}
+    try:
+        from app.services.dedup_service import dedupe_within_report, register_demand_lines
+        matched_rows, dropped = dedupe_within_report(matched_rows)
+        ledger = await register_demand_lines(db, matched_rows, source_email_id=email.id)
+        dedup_summary = {"duplicates_dropped_in_report": dropped, **ledger}
+    except Exception as e:
+        logger.warning(f"Dedup step skipped (ZSO still generated): {e}")
+
     # Build ZSO report
     zso_data = build_zso_data(matched_rows, kas_name=current_user.full_name, forex_rates=forex_rates)
     if applied_instructions:
         zso_data["applied_instructions"] = applied_instructions
+    if dedup_summary:
+        zso_data["dedup_summary"] = dedup_summary
 
-    # Save report
+    # ── Version history (additive, snapshot-preserving) ──────────────────────
+    # Attach this upload to its demand chain (matched by part overlap). If nothing
+    # changed vs the latest version → duplicate: don't save a new report/version.
+    # Wrapped defensively — versioning must never break report generation.
+    try:
+        from app.services import versioning_service as vs
+        items = zso_data.get("items", [])
+        doc_class = vs.document_class(items)
+        parts = vs.part_set(items)
+        customer = vs.primary_customer(items)
+        source = "manual" if str(email.gmail_message_id or "").startswith("manual-upload-") else "email"
+        latest = await vs.find_latest_chain_version(db, parts, doc_class, customer)
+
+        if latest is not None:
+            snap = (await db.execute(
+                select(ZSOReport).where(ZSOReport.id == latest.zso_report_id)
+            )).scalar_one_or_none()
+            old_items = (snap.report_data or {}).get("items", []) if snap else []
+            diff = vs.diff_items(old_items, items)
+            if not diff["has_changes"] and snap is not None:
+                logger.info(f"ZSO generate: no changes vs v{latest.version_number} — duplicate, no new version")
+                return snap  # return the existing current version; nothing new saved
+            report = await save_zso_report(db, email.id, current_user, zso_data)
+            await vs.record_version(
+                db, demand_doc_key=latest.demand_doc_key,
+                version_number=latest.version_number + 1, zso_report_id=report.id,
+                is_base=False, source=source, source_email_id=email.id,
+                doc_class=doc_class, customer=customer, created_by=current_user.id, diff=diff,
+            )
+            return report
+
+        # No matching chain → this is a new base document (V1)
+        report = await save_zso_report(db, email.id, current_user, zso_data)
+        base_diff = {"added": [], "removed": [], "modified": [], "unchanged": 0,
+                     "has_changes": False,
+                     "counts": {"total": len(items), "added": 0, "removed": 0, "modified": 0, "unchanged": 0}}
+        await vs.record_version(
+            db, demand_doc_key=f"doc_{report.id}", version_number=1, zso_report_id=report.id,
+            is_base=True, source=source, source_email_id=email.id,
+            doc_class=doc_class, customer=customer, created_by=current_user.id, diff=base_diff,
+        )
+        return report
+    except Exception as e:
+        logger.warning(f"Version tracking skipped (report still generated): {e}")
+
+    # Fallback: plain save (versioning unavailable/failed)
     report = await save_zso_report(db, email.id, current_user, zso_data)
     return report
 
@@ -152,6 +215,63 @@ async def list_zso_reports(
 
     result = await db.execute(query)
     return result.scalars().all()
+
+
+@router.get("/{report_id}/versions")
+async def get_report_versions(
+    report_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Version history for the demand chain this report belongs to."""
+    from app.models.data import ReportVersion
+    mine = (await db.execute(
+        select(ReportVersion).where(ReportVersion.zso_report_id == report_id)
+    )).scalar_one_or_none()
+    if not mine:
+        return {"demand_doc_key": None, "versions": []}
+    chain = (await db.execute(
+        select(ReportVersion).where(ReportVersion.demand_doc_key == mine.demand_doc_key)
+        .order_by(ReportVersion.version_number.asc())
+    )).scalars().all()
+    return {
+        "demand_doc_key": mine.demand_doc_key,
+        "versions": [{
+            "version_id": v.id,
+            "version": (f"v{v.version_number}" if v.is_base else f"v{v.version_number}"),
+            "version_number": v.version_number,
+            "is_base": v.is_base,
+            "zso_report_id": v.zso_report_id,
+            "source": v.source,
+            "doc_class": v.doc_class,
+            "customer_name": v.customer_name,
+            "total_rows": v.total_rows,
+            "added_rows": v.added_rows,
+            "removed_rows": v.removed_rows,
+            "modified_rows": v.modified_rows,
+            "unchanged_rows": v.unchanged_rows,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+        } for v in chain],
+    }
+
+
+@router.get("/versions/{version_id}/changes")
+async def get_version_changes(
+    version_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Field-level changes recorded for a version (added / removed / modified)."""
+    from app.models.data import ReportChange
+    rows = (await db.execute(
+        select(ReportChange).where(ReportChange.version_id == version_id)
+        .order_by(ReportChange.change_type, ReportChange.cust_part_no)
+    )).scalars().all()
+    return [{
+        "row_key": r.row_key, "cust_part_no": r.cust_part_no, "po_number": r.po_number,
+        "change_type": r.change_type, "field_name": r.field_name,
+        "old_value": r.old_value, "new_value": r.new_value,
+    } for r in rows]
 
 
 @router.get("/{report_id}", response_model=ZSOReportResponse)

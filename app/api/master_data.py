@@ -25,6 +25,8 @@ def _normalize_column_name(header: str) -> str:
 COLUMN_MAP = {
     "customer_name": ["customer name", "customer", "cust name", "client name"],
     "customer_location": ["customer location", "location", "cust location", "city", "site", "site location"],
+    "sold_to_party": ["sold to party", "sold-to party", "sold to", "soldto", "sold to party name"],
+    "ship_to_party": ["ship to party", "ship-to party", "ship to", "shipto", "ship to party name"],
     "customer_part_no": [
         "customer_part_no",
         "customer part no",
@@ -77,6 +79,7 @@ COLUMN_MAP = {
         "net price",
     ],
     "currency": ["currency", "curr", "currency code"],
+    "incoterm": ["incoterm", "incoterms", "inco term", "inco terms", "delivery term", "delivery terms"],
     "hsn_code": ["hsn_code", "hsn code", "hsn", "hs code"],
 }
 

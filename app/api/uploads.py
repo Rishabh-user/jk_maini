@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import uuid as _uuid
@@ -232,6 +233,7 @@ def _get_source_type(filename: str) -> str:
 async def upload_document(
     file: UploadFile = File(...),
     process: bool = Query(True, description="Auto-process the file after upload"),
+    force: bool = Query(False, description="Upload even if an identical file already exists"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.KAS)),
 ):
@@ -256,6 +258,23 @@ async def upload_document(
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="File is empty")
+
+    # ── Duplicate-file check ────────────────────────────────────────────────
+    # SHA-256 fingerprints the exact bytes; the same file re-uploaded produces the
+    # same hash. Block it (unless ?force=true) so identical files aren't ingested twice.
+    file_hash = hashlib.sha256(content).hexdigest()
+    if not force:
+        dup = (await db.execute(
+            select(Attachment).where(Attachment.file_hash == file_hash)
+            .order_by(Attachment.created_at.desc()).limit(1)
+        )).scalar_one_or_none()
+        if dup:
+            when = dup.created_at.strftime("%d %b %Y") if dup.created_at else "earlier"
+            raise HTTPException(
+                status_code=409,
+                detail=(f"This exact file was already uploaded as '{dup.filename}' on {when}. "
+                        f"Re-upload anyway by confirming (force)."),
+            )
 
     # Create a virtual "email" record to keep the same data flow as Gmail imports
     email = Email(
@@ -282,6 +301,7 @@ async def upload_document(
         content_type=file.content_type or "application/octet-stream",
         file_path=file_path,
         file_size=len(content),
+        file_hash=file_hash,
     )
     db.add(attachment)
     await db.flush()

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, Fragment } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Upload, FileSpreadsheet, TrendingUp, TrendingDown, AlertTriangle,
@@ -211,8 +211,13 @@ function ComparisonTab() {
   const [comparison, setComparison] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [activeSection, setActiveSection] = useState('changes')
+  const [activeSection, setActiveSection] = useState('summary')
   const [followups, setFollowups] = useState([])
+  const [expandedCust, setExpandedCust] = useState(null)
+  const [changeView, setChangeView] = useState('line')   // 'line' | 'part'
+  const [monthFilter, setMonthFilter] = useState('all')
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
 
   useEffect(() => {
     fetchDemandReports().then(r => setReports(r.data)).catch(console.error)
@@ -352,103 +357,85 @@ function ComparisonTab() {
         {error && <div className="mt-3 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">{error}</div>}
       </div>
 
-      {comparison && (
+      {comparison && (() => {
+        const k = comparison.kpi || {}
+        const SECTIONS = [
+          { id: 'summary', label: 'Summary' },
+          { id: 'changes', label: 'Quantity Changes' },
+          { id: 'new', label: 'New Parts' },
+          { id: 'removed', label: 'Removed Parts' },
+          { id: 'customer', label: 'Customer Summary' },
+          { id: 'monthly', label: 'Monthly Summary' },
+        ]
+        return (
         <>
-          {/* Summary */}
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-            {[
-              { label: 'Qty Increases', count: comparison.summary.total_increases, color: 'green', icon: TrendingUp, id: 'changes' },
-              { label: 'Qty Decreases', count: comparison.summary.total_decreases, color: 'red', icon: TrendingDown, id: 'changes' },
-              { label: 'New Items', count: comparison.summary.total_new, color: 'blue', icon: Plus, id: 'new' },
-              { label: 'Removed Items', count: comparison.summary.total_removed, color: 'yellow', icon: AlertTriangle, id: 'removed' },
-              { label: 'Needs Follow-up', count: comparison.summary.abrupt_changes ?? 0, color: 'orange', icon: AlertTriangle, id: 'followup' },
-            ].map(s => (
-              <button key={s.label} onClick={() => setActiveSection(s.id)}
-                className={`border bg-${s.color}-50 border-${s.color}-200 rounded-lg p-4 text-left hover:shadow-sm transition-shadow ${activeSection === s.id ? 'ring-2 ring-' + s.color + '-400' : ''}`}>
-                <div className={`flex items-center gap-2 mb-1 text-${s.color}-700`}>
-                  <s.icon size={15} /><span className="text-xs font-medium">{s.label}</span>
-                </div>
-                <p className={`text-2xl font-bold text-${s.color}-800`}>{s.count}</p>
+          {/* KPI strip — Drop / Increase, qty + value */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="border bg-green-50 border-green-200 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-1 text-green-700"><TrendingUp size={15} /><span className="text-xs font-medium">Increase</span></div>
+              <p className="text-2xl font-bold text-green-800">{cmpNum(k.increase_qty)}<span className="text-sm font-medium text-green-600"> qty</span></p>
+              <p className="text-xs text-green-700 mt-0.5">{cmpMoney(k.increase_value)} · {k.increase_lines + k.new_lines} lines</p>
+            </div>
+            <div className="border bg-red-50 border-red-200 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-1 text-red-700"><TrendingDown size={15} /><span className="text-xs font-medium">Drop</span></div>
+              <p className="text-2xl font-bold text-red-800">{cmpNum(k.drop_qty)}<span className="text-sm font-medium text-red-600"> qty</span></p>
+              <p className="text-xs text-red-700 mt-0.5">{cmpMoney(k.drop_value)} · {k.drop_lines + k.removed_lines} lines</p>
+            </div>
+            <div className="border bg-blue-50 border-blue-200 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-1 text-blue-700"><ArrowRightLeft size={15} /><span className="text-xs font-medium">Net Change</span></div>
+              <p className={`text-2xl font-bold ${k.net_qty >= 0 ? 'text-green-800' : 'text-red-800'}`}>{k.net_qty >= 0 ? '+' : ''}{cmpNum(k.net_qty)}</p>
+              <p className="text-xs text-blue-700 mt-0.5">{k.net_value >= 0 ? '+' : '−'}{cmpMoney(Math.abs(k.net_value))} net value</p>
+            </div>
+            <div className="border bg-orange-50 border-orange-200 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-1 text-orange-700"><AlertTriangle size={15} /><span className="text-xs font-medium">New / Removed / Follow-ups</span></div>
+              <p className="text-2xl font-bold text-orange-800">{k.new_lines} / {k.removed_lines} / {k.abrupt_changes}</p>
+              <p className="text-xs text-orange-700 mt-0.5">new · removed · need follow-up</p>
+            </div>
+          </div>
+
+          {/* Segmented switcher */}
+          <div className="flex gap-1 bg-gray-100 rounded-lg p-1 flex-wrap">
+            {SECTIONS.map(s => (
+              <button key={s.id} onClick={() => setActiveSection(s.id)}
+                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${activeSection === s.id ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>
+                {s.label}
               </button>
             ))}
           </div>
 
-          {/* Changes table */}
-          {activeSection === 'changes' && (
-            <ComparisonTable
-              title="Quantity Changes"
-              columns={['Cust Part #', 'Customer', 'Prev Qty', 'Curr Qty', 'Change', 'PO / Forecast', 'Ship Date', 'Follow-up']}
-              rows={[...comparison.increases, ...comparison.decreases]}
-              renderRow={(item, i) => (
-                <tr key={i} className={`border-b border-gray-50 ${item.abrupt ? 'bg-orange-50/40' : item.change > 0 ? 'bg-green-50/20' : 'bg-red-50/20'}`}>
-                  <td className="px-4 py-2 font-mono text-xs text-gray-800">{item.part}</td>
-                  <td className="px-4 py-2 text-sm text-gray-600">{item.customer || '—'}</td>
-                  <td className="px-4 py-2 text-sm">{item.prev_qty}</td>
-                  <td className="px-4 py-2 text-sm font-semibold">{item.curr_qty}</td>
-                  <td className="px-4 py-2 text-sm font-bold">
-                    <span className={item.change > 0 ? 'text-green-700' : 'text-red-700'}>
-                      {item.change > 0 ? '+' : ''}{item.change}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2 text-xs text-gray-500">{item.po || '—'}</td>
-                  <td className="px-4 py-2 text-xs text-gray-500">{item.ship_date || '—'}</td>
-                  <td className="px-4 py-2">{renderFollowupCell(item, followupRowIds, logFollowup)}</td>
-                </tr>
-              )}
-              empty="No quantity changes between these two reports."
-            />
-          )}
-
-          {activeSection === 'new' && (
-            <ComparisonTable
-              title="New Items (in current, not in previous)"
-              columns={['Cust Part #', 'Customer', 'Qty', 'PO / Forecast', 'Ship Date', 'Follow-up']}
-              rows={comparison.new_items}
-              renderRow={(item, i) => (
-                <tr key={i} className="border-b border-gray-50 bg-blue-50/20">
-                  <td className="px-4 py-2 font-mono text-xs text-gray-800">{item.part}</td>
-                  <td className="px-4 py-2 text-sm text-gray-600">{item.customer || '—'}</td>
-                  <td className="px-4 py-2 text-sm font-semibold text-blue-700">{item.qty}</td>
-                  <td className="px-4 py-2 text-xs text-gray-500">{item.po || '—'}</td>
-                  <td className="px-4 py-2 text-xs text-gray-500">{item.ship_date || '—'}</td>
-                  <td className="px-4 py-2">{renderFollowupCell(item, followupRowIds, logFollowup)}</td>
-                </tr>
-              )}
-              empty="No new items."
-            />
-          )}
-
-          {activeSection === 'removed' && (
-            <ComparisonTable
-              title="Removed Items (in previous, not in current)"
-              columns={['Cust Part #', 'Customer', 'Qty', 'PO / Forecast', 'Ship Date', 'Follow-up']}
-              rows={comparison.removed_items}
-              renderRow={(item, i) => (
-                <tr key={i} className="border-b border-gray-50 bg-yellow-50/20">
-                  <td className="px-4 py-2 font-mono text-xs text-gray-800">{item.part}</td>
-                  <td className="px-4 py-2 text-sm text-gray-600">{item.customer || '—'}</td>
-                  <td className="px-4 py-2 text-sm font-semibold text-yellow-700">{item.qty}</td>
-                  <td className="px-4 py-2 text-xs text-gray-500">{item.po || '—'}</td>
-                  <td className="px-4 py-2 text-xs text-gray-500">{item.ship_date || '—'}</td>
-                  <td className="px-4 py-2">{renderFollowupCell(item, followupRowIds, logFollowup)}</td>
-                </tr>
-              )}
-              empty="No removed items."
-            />
-          )}
-
-          {/* Follow-up checklist / audit trail */}
-          {activeSection === 'followup' && (
+          {/* SUMMARY — overview + follow-up audit trail */}
+          {activeSection === 'summary' && (
+            <div className="space-y-4">
+            <div className="bg-white rounded-xl border border-gray-200 p-5">
+              <p className="text-sm text-gray-700 mb-3">
+                Net change vs the selected earlier version:{' '}
+                <b className={k.net_qty >= 0 ? 'text-green-700' : 'text-red-700'}>{k.net_qty >= 0 ? '+' : ''}{cmpNum(k.net_qty)} qty</b>
+                {' '}({k.net_value >= 0 ? '+' : '−'}{cmpMoney(Math.abs(k.net_value))}). Click a card to jump to its detail.
+              </p>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {[
+                  { label: 'Qty Increased', n: k.increase_lines, id: 'changes' },
+                  { label: 'Qty Dropped', n: k.drop_lines, id: 'changes' },
+                  { label: 'New Parts', n: k.new_lines, id: 'new' },
+                  { label: 'Removed Parts', n: k.removed_lines, id: 'removed' },
+                ].map(s => (
+                  <button key={s.label} onClick={() => setActiveSection(s.id)}
+                    className="border border-gray-200 rounded-lg p-3 text-left hover:bg-gray-50 transition-colors">
+                    <p className="text-xs text-gray-500">{s.label}</p>
+                    <p className="text-2xl font-bold text-gray-800">{s.n}</p>
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-gray-400 mt-3">An empty section simply means there were no changes of that type between these two versions.</p>
+            </div>
             <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
               <div className="px-5 py-3 border-b border-gray-100 bg-orange-50 flex items-center gap-2">
                 <AlertTriangle size={15} className="text-orange-600" />
-                <h3 className="text-sm font-semibold text-orange-800">
-                  Customer Follow-ups <span className="text-orange-400 font-normal ml-1">({followups.length})</span>
-                </h3>
+                <h3 className="text-sm font-semibold text-orange-800">Customer Follow-ups <span className="text-orange-400 font-normal ml-1">({followups.length})</span></h3>
               </div>
               {followups.length === 0 ? (
                 <div className="px-5 py-8 text-center text-sm text-gray-400">
-                  No follow-ups logged yet. Open the Increases/Decreases/New/Removed tabs and click
+                  No follow-ups yet. Open Quantity Changes / New / Removed and click
                   <span className="mx-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 text-xs"><AlertTriangle size={11}/> Log follow-up</span>
                   on an abrupt change to start the audit trail.
                 </div>
@@ -457,9 +444,7 @@ function ComparisonTab() {
                   {followups.map(f => (
                     <li key={f.id} className="px-5 py-3 flex items-start gap-3">
                       <button onClick={() => toggleFollowup(f)} className="mt-0.5 shrink-0" title={f.status === 'done' ? 'Mark open' : 'Mark done'}>
-                        {f.status === 'done'
-                          ? <CheckCircle size={18} className="text-green-600" />
-                          : <Clock size={18} className="text-orange-500" />}
+                        {f.status === 'done' ? <CheckCircle size={18} className="text-green-600" /> : <Clock size={18} className="text-orange-500" />}
                       </button>
                       <div className="flex-1 min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -469,26 +454,220 @@ function ComparisonTab() {
                             f.change_type === 'new' ? 'bg-blue-100 text-blue-700'
                             : f.change_type === 'removed' ? 'bg-yellow-100 text-yellow-700'
                             : f.change_type === 'increase' ? 'bg-green-100 text-green-700'
-                            : 'bg-red-100 text-red-700'}`}>{f.change_type}</span>
-                          {(f.prev_qty != null || f.curr_qty != null) && (
-                            <span className="text-[11px] text-gray-400">{f.prev_qty ?? '—'} → {f.curr_qty ?? '—'}</span>
-                          )}
+                            : 'bg-red-100 text-red-700'}`}>{f.change_type === 'decrease' ? 'drop' : f.change_type}</span>
+                          {(f.prev_qty != null || f.curr_qty != null) && (<span className="text-[11px] text-gray-400">{f.prev_qty ?? '—'} → {f.curr_qty ?? '—'}</span>)}
                           {f.status === 'done' && <span className="text-[11px] text-green-600">✓ resolved</span>}
                         </div>
                         <p className={`text-sm mt-0.5 ${f.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-700'}`}>{f.note || '(no note)'}</p>
                         <p className="text-[11px] text-gray-400 mt-0.5">{f.created_at ? new Date(f.created_at).toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) : ''}</p>
                       </div>
-                      <button onClick={() => removeFollowup(f)} className="p-1 rounded hover:bg-red-50 text-red-400 shrink-0" title="Delete">
-                        <Trash2 size={15} />
-                      </button>
+                      <button onClick={() => removeFollowup(f)} className="p-1 rounded hover:bg-red-50 text-red-400 shrink-0" title="Delete"><Trash2 size={15} /></button>
                     </li>
                   ))}
                 </ul>
               )}
             </div>
+            </div>
+          )}
+
+          {/* QUANTITY CHANGES — per-line / per-part toggle + month filter */}
+          {activeSection === 'changes' && (() => {
+            const months = (comparison.monthly_summary || []).map(m => m.month)
+            const lines = [...comparison.increases, ...comparison.decreases]
+              .filter(x => monthFilter === 'all' || x.month === monthFilter)
+              .filter(x => inDateRange(x.ship_date, fromDate, toDate))
+            return (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs font-medium">
+                    <button onClick={() => setChangeView('line')} className={`px-3 py-1.5 ${changeView === 'line' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`}>Per line</button>
+                    <button onClick={() => setChangeView('part')} className={`px-3 py-1.5 ${changeView === 'part' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`}>Per part (net)</button>
+                  </div>
+                  <select value={monthFilter} onChange={e => setMonthFilter(e.target.value)}
+                    className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg">
+                    <option value="all">All ship months</option>
+                    {months.map(m => <option key={m} value={m}>{cmpMonth(m)}</option>)}
+                  </select>
+                  <DateRangeFilter from={fromDate} to={toDate} setFrom={setFromDate} setTo={setToDate} />
+                </div>
+
+                {changeView === 'line' ? (
+                  <ComparisonTable
+                    title="Quantity Changes — per line (biggest first)"
+                    columns={['Cust Part #', 'Customer', 'Prev Qty', 'Curr Qty', 'Change', 'PO / Forecast', 'Ship Date', 'Follow-up']}
+                    rows={lines}
+                    renderRow={(item, i) => (
+                      <tr key={i} className={`border-b border-gray-50 ${item.abrupt ? 'bg-orange-50/40' : item.change > 0 ? 'bg-green-50/20' : 'bg-red-50/20'}`}>
+                        <td className="px-4 py-2 font-mono text-xs text-gray-800">{item.part}</td>
+                        <td className="px-4 py-2 text-sm text-gray-600">{item.customer || '—'}</td>
+                        <td className="px-4 py-2 text-sm">{cmpNum(item.prev_qty)}</td>
+                        <td className="px-4 py-2 text-sm font-semibold">{cmpNum(item.curr_qty)}</td>
+                        <td className="px-4 py-2 text-sm font-bold"><span className={item.change > 0 ? 'text-green-700' : 'text-red-700'}>{item.change > 0 ? '+' : ''}{cmpNum(item.change)}</span></td>
+                        <td className="px-4 py-2 text-xs text-gray-500">{item.po || '—'}</td>
+                        <td className="px-4 py-2 text-xs text-gray-500">{item.ship_date || '—'}</td>
+                        <td className="px-4 py-2">{renderFollowupCell(item, followupRowIds, logFollowup)}</td>
+                      </tr>
+                    )}
+                    empty="No quantity changes for this filter."
+                  />
+                ) : (
+                  <ComparisonTable
+                    title="Quantity Changes — per part (net, biggest first)"
+                    columns={['Maini Part #', 'Cust Part #', 'Customer', 'Net Change', 'Lines']}
+                    rows={rollupByPart(lines)}
+                    renderRow={(p, i) => (
+                      <tr key={i} className={`border-b border-gray-50 ${p.abrupt ? 'bg-orange-50/40' : p.net_change >= 0 ? 'bg-green-50/20' : 'bg-red-50/20'}`}>
+                        <td className="px-4 py-2 font-mono text-xs text-gray-800">{p.maini_part_no || '—'}</td>
+                        <td className="px-4 py-2 font-mono text-xs text-gray-600">{p.part || '—'}</td>
+                        <td className="px-4 py-2 text-sm text-gray-600">{p.customer || '—'}</td>
+                        <td className="px-4 py-2 text-sm font-bold"><span className={p.net_change >= 0 ? 'text-green-700' : 'text-red-700'}>{p.net_change > 0 ? '+' : ''}{cmpNum(p.net_change)}</span></td>
+                        <td className="px-4 py-2 text-xs text-gray-500">{p.lines}</td>
+                      </tr>
+                    )}
+                    empty="No quantity changes for this filter."
+                  />
+                )}
+              </div>
+            )
+          })()}
+
+          {/* NEW PARTS */}
+          {activeSection === 'new' && (
+            <ComparisonTable
+              title="New Parts (in current, not in previous)"
+              columns={['Cust Part #', 'Customer', 'Qty', 'PO / Forecast', 'Ship Date', 'Follow-up']}
+              rows={comparison.new_items}
+              renderRow={(item, i) => (
+                <tr key={i} className="border-b border-gray-50 bg-blue-50/20">
+                  <td className="px-4 py-2 font-mono text-xs text-gray-800">{item.part}</td>
+                  <td className="px-4 py-2 text-sm text-gray-600">{item.customer || '—'}</td>
+                  <td className="px-4 py-2 text-sm font-semibold text-blue-700">{cmpNum(item.qty)}</td>
+                  <td className="px-4 py-2 text-xs text-gray-500">{item.po || '—'}</td>
+                  <td className="px-4 py-2 text-xs text-gray-500">{item.ship_date || '—'}</td>
+                  <td className="px-4 py-2">{renderFollowupCell(item, followupRowIds, logFollowup)}</td>
+                </tr>
+              )}
+              empty="No new parts."
+            />
+          )}
+
+          {/* REMOVED PARTS */}
+          {activeSection === 'removed' && (
+            <ComparisonTable
+              title="Removed Parts (in previous, not in current)"
+              columns={['Cust Part #', 'Customer', 'Qty', 'PO / Forecast', 'Ship Date', 'Follow-up']}
+              rows={comparison.removed_items}
+              renderRow={(item, i) => (
+                <tr key={i} className="border-b border-gray-50 bg-yellow-50/20">
+                  <td className="px-4 py-2 font-mono text-xs text-gray-800">{item.part}</td>
+                  <td className="px-4 py-2 text-sm text-gray-600">{item.customer || '—'}</td>
+                  <td className="px-4 py-2 text-sm font-semibold text-yellow-700">{cmpNum(item.qty)}</td>
+                  <td className="px-4 py-2 text-xs text-gray-500">{item.po || '—'}</td>
+                  <td className="px-4 py-2 text-xs text-gray-500">{item.ship_date || '—'}</td>
+                  <td className="px-4 py-2">{renderFollowupCell(item, followupRowIds, logFollowup)}</td>
+                </tr>
+              )}
+              empty="No removed parts."
+            />
+          )}
+
+          {/* CUSTOMER SUMMARY — Drop & Increase by customer, expandable */}
+          {activeSection === 'customer' && (
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-100 bg-gray-50">
+                <h3 className="text-sm font-semibold text-gray-800">Drop &amp; Increase Summary — by Customer <span className="text-gray-400 font-normal ml-1">({(comparison.customer_summary || []).length})</span></h3>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead><tr className="border-b border-gray-100">
+                    {['', 'Customer', 'Increase Qty', 'Drop Qty', 'Net Qty', 'Increase Value', 'Drop Value', 'Net Value', 'Parts'].map(h => (
+                      <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr></thead>
+                  <tbody>
+                    {(comparison.customer_summary || []).length === 0
+                      ? <tr><td colSpan={9} className="px-4 py-6 text-center text-sm text-gray-400">No changes to summarize.</td></tr>
+                      : comparison.customer_summary.map((c, i) => {
+                        const open = expandedCust === c.customer
+                        return (
+                          <Fragment key={i}>
+                            <tr className="border-b border-gray-50 hover:bg-gray-50 cursor-pointer" onClick={() => setExpandedCust(open ? null : c.customer)}>
+                              <td className="px-4 py-2 text-gray-400">{open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</td>
+                              <td className="px-4 py-2 font-medium text-gray-800">{c.customer}</td>
+                              <td className="px-4 py-2 text-green-700">{cmpNum(c.increase_qty)}</td>
+                              <td className="px-4 py-2 text-red-700">{cmpNum(c.drop_qty)}</td>
+                              <td className={`px-4 py-2 font-semibold ${c.net_qty >= 0 ? 'text-green-800' : 'text-red-800'}`}>{c.net_qty >= 0 ? '+' : ''}{cmpNum(c.net_qty)}</td>
+                              <td className="px-4 py-2 text-green-700">{cmpMoney(c.increase_value)}</td>
+                              <td className="px-4 py-2 text-red-700">{cmpMoney(c.drop_value)}</td>
+                              <td className={`px-4 py-2 font-semibold ${c.net_value >= 0 ? 'text-green-800' : 'text-red-800'}`}>{c.net_value >= 0 ? '+' : '−'}{cmpMoney(Math.abs(c.net_value))}</td>
+                              <td className="px-4 py-2 text-gray-500">{c.part_count}</td>
+                            </tr>
+                            {open && (
+                              <tr className="bg-gray-50/60"><td></td><td colSpan={8} className="px-4 py-2">
+                                <table className="w-full text-xs">
+                                  <thead><tr className="text-gray-400">
+                                    {['Cust Part #', 'Type', 'Prev', 'Curr', 'Change', 'Ship Date'].map(h => <th key={h} className="text-left font-medium py-1 pr-4">{h}</th>)}
+                                  </tr></thead>
+                                  <tbody>
+                                    {c.parts.map((p, j) => (
+                                      <tr key={j} className="border-t border-gray-100">
+                                        <td className="py-1 pr-4 font-mono text-gray-700">{p.part}</td>
+                                        <td className="py-1 pr-4 capitalize">{p.change_type}</td>
+                                        <td className="py-1 pr-4">{p.prev_qty != null ? cmpNum(p.prev_qty) : '—'}</td>
+                                        <td className="py-1 pr-4">{p.curr_qty != null ? cmpNum(p.curr_qty) : (p.qty != null ? cmpNum(p.qty) : '—')}</td>
+                                        <td className={`py-1 pr-4 font-medium ${(p.change ?? p.qty ?? 0) >= 0 && p.change_type !== 'drop' && p.change_type !== 'removed' ? 'text-green-700' : 'text-red-700'}`}>
+                                          {p.change != null ? (p.change > 0 ? '+' : '') + cmpNum(p.change) : (p.change_type === 'removed' ? '−' + cmpNum(p.qty) : '+' + cmpNum(p.qty))}
+                                        </td>
+                                        <td className="py-1 pr-4 text-gray-400">{p.ship_date || '—'}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </td></tr>
+                            )}
+                          </Fragment>
+                        )
+                      })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* MONTHLY SUMMARY — by ship month, with month filter */}
+          {activeSection === 'monthly' && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <select value={monthFilter} onChange={e => setMonthFilter(e.target.value)}
+                  className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg">
+                  <option value="all">All ship months</option>
+                  {(comparison.monthly_summary || []).map(m => <option key={m.month} value={m.month}>{cmpMonth(m.month)}</option>)}
+                </select>
+                <DateRangeFilter from={fromDate} to={toDate} setFrom={setFromDate} setTo={setToDate} />
+              </div>
+              <ComparisonTable
+                title="Monthly Summary — changes by ship month"
+                columns={['Ship Month', 'Increase Qty', 'Drop Qty', 'Net Qty', 'Increase Value', 'Drop Value', 'Net Value', 'Parts']}
+                rows={(comparison.monthly_summary || []).filter(m => (monthFilter === 'all' || m.month === monthFilter) && monthInRange(m.month, fromDate, toDate))}
+                renderRow={(m, i) => (
+                <tr key={i} className="border-b border-gray-50 hover:bg-gray-50">
+                  <td className="px-4 py-2 font-medium text-gray-800">{cmpMonth(m.month)}</td>
+                  <td className="px-4 py-2 text-green-700">{cmpNum(m.increase_qty)}</td>
+                  <td className="px-4 py-2 text-red-700">{cmpNum(m.drop_qty)}</td>
+                  <td className={`px-4 py-2 font-semibold ${m.net_qty >= 0 ? 'text-green-800' : 'text-red-800'}`}>{m.net_qty >= 0 ? '+' : ''}{cmpNum(m.net_qty)}</td>
+                  <td className="px-4 py-2 text-green-700">{cmpMoney(m.increase_value)}</td>
+                  <td className="px-4 py-2 text-red-700">{cmpMoney(m.drop_value)}</td>
+                  <td className={`px-4 py-2 font-semibold ${m.net_value >= 0 ? 'text-green-800' : 'text-red-800'}`}>{m.net_value >= 0 ? '+' : '−'}{cmpMoney(Math.abs(m.net_value))}</td>
+                  <td className="px-4 py-2 text-gray-500">{m.part_count}</td>
+                </tr>
+              )}
+              empty="No monthly changes."
+              />
+            </div>
           )}
         </>
-      )}
+        )
+      })()}
 
       {!comparison && !loading && (
         <div className="bg-white rounded-xl border border-gray-200 p-10 text-center text-sm text-gray-400">
@@ -513,6 +692,69 @@ function renderFollowupCell(item, followupRowIds, logFollowup) {
       className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium bg-orange-100 text-orange-700 rounded hover:bg-orange-200">
       <AlertTriangle size={12} /> Log follow-up
     </button>
+  )
+}
+
+// Filter a line by its ship-date against a From/To range (inclusive). A line
+// with no/unparseable ship date is excluded once any bound is set.
+const inDateRange = (shipDate, from, to) => {
+  if (!from && !to) return true
+  if (!shipDate) return false
+  const t = new Date(shipDate).getTime()
+  if (isNaN(t)) return false
+  if (from && t < new Date(from).getTime()) return false
+  if (to && t > new Date(to + 'T23:59:59').getTime()) return false
+  return true
+}
+// Same idea for a YYYY-MM month bucket (used by Monthly Summary).
+const monthInRange = (month, from, to) => {
+  if (!from && !to) return true
+  if (!month || month === 'Unscheduled') return false
+  if (from && month < from.slice(0, 7)) return false
+  if (to && month > to.slice(0, 7)) return false
+  return true
+}
+
+// Aggregate per-line changes into one net row per Maini part (for #6 per-part view).
+function rollupByPart(lines) {
+  const map = {}
+  for (const x of lines) {
+    const key = x.maini_part_no || x.part || x.row_id
+    const g = map[key] || (map[key] = {
+      maini_part_no: x.maini_part_no || '', part: x.part || '', customer: x.customer || '',
+      net_change: 0, net_value: 0, lines: 0, abrupt: false,
+    })
+    g.net_change += (x.change || 0)
+    g.net_value += (x.value_change || 0)
+    g.lines += 1
+    g.abrupt = g.abrupt || !!x.abrupt
+  }
+  return Object.values(map).sort((a, b) => Math.abs(b.net_change) - Math.abs(a.net_change))
+}
+
+const cmpNum = (n) => Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })
+const cmpMoney = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })
+const CMP_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const cmpMonth = (m) => {
+  if (!m || m === 'Unscheduled') return 'Unscheduled'
+  const [y, mo] = m.split('-')
+  return mo ? `${CMP_MONTHS[+mo - 1]} ${y}` : m
+}
+
+function DateRangeFilter({ from, to, setFrom, setTo }) {
+  return (
+    <div className="flex items-center gap-1.5 text-sm">
+      <span className="text-xs text-gray-500">Ship date</span>
+      <input type="date" value={from} onChange={e => setFrom(e.target.value)} max={to || undefined}
+        className="px-2 py-1.5 text-sm border border-gray-200 rounded-lg" title="From ship date" />
+      <span className="text-gray-400">→</span>
+      <input type="date" value={to} onChange={e => setTo(e.target.value)} min={from || undefined}
+        className="px-2 py-1.5 text-sm border border-gray-200 rounded-lg" title="To ship date" />
+      {(from || to) && (
+        <button onClick={() => { setFrom(''); setTo('') }}
+          className="px-2 py-1 text-xs text-gray-500 border border-gray-200 rounded-lg hover:bg-gray-50">Clear</button>
+      )}
+    </div>
   )
 }
 

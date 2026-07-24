@@ -41,6 +41,8 @@ class Attachment(Base):
     content_type: Mapped[str | None] = mapped_column(String(255))
     file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
     file_size: Mapped[int | None] = mapped_column(Integer)
+    # SHA-256 of the file bytes — lets us detect the same file being re-uploaded.
+    file_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     email: Mapped["Email"] = relationship(back_populates="attachments")

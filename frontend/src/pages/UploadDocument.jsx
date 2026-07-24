@@ -63,6 +63,21 @@ export default function UploadDocument() {
         const res = await uploadDocument(file, true)
         results.push({ success: true, filename: file.name, data: res.data })
       } catch (err) {
+        // 409 = identical file already uploaded. Offer to re-upload anyway (force).
+        if (err.response?.status === 409) {
+          const msg = err.response?.data?.detail || 'This file was already uploaded.'
+          if (window.confirm(`${msg}\n\nUpload it again anyway?`)) {
+            try {
+              const res = await uploadDocument(file, true, true)
+              results.push({ success: true, filename: file.name, data: res.data })
+            } catch (e2) {
+              results.push({ success: false, filename: file.name, error: e2.response?.data?.detail || e2.message })
+            }
+          } else {
+            results.push({ success: false, filename: file.name, error: 'Skipped — duplicate of an already-uploaded file.' })
+          }
+          continue
+        }
         results.push({
           success: false,
           filename: file.name,

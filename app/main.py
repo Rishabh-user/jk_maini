@@ -11,7 +11,7 @@ from app.models import (  # noqa: F401 — register models
     User, Email, Attachment, RawData, MainiPart, ZSOReport,
     DemandUpload, InventoryStock, AllocationResult,
     CoverageReport, SalesData, BudgetData, ForexRate, ForecastEntry, MasterDataCorrection,
-    DemandFollowUp,
+    DemandFollowUp, DemandLine, ReportVersion, ReportChange,
 )
 from app.api import auth, users, emails, attachments, zso, dashboard, master_data
 from app.api import demand, inventory, coverage, performance, uploads, forex, forecast_data
