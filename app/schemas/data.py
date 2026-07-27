@@ -17,12 +17,15 @@ class RawDataResponse(BaseModel):
 class MainiPartCreate(BaseModel):
     customer_name: str | None = None
     customer_location: str | None = None
+    sold_to_party: str | None = None
+    ship_to_party: str | None = None
     customer_part_no: str
     maini_part_no: str | None = None
     description: str | None = None
     country: str | None = None
     unit_price: float | None = None
     currency: str = "INR"
+    incoterm: str | None = None
     hsn_code: str | None = None
 
 
@@ -30,12 +33,15 @@ class MainiPartResponse(BaseModel):
     id: int
     customer_name: str | None
     customer_location: str | None
+    sold_to_party: str | None = None
+    ship_to_party: str | None = None
     customer_part_no: str
     maini_part_no: str | None
     description: str | None
     country: str | None
     unit_price: float | None
     currency: str | None
+    incoterm: str | None = None
     hsn_code: str | None
     created_at: datetime
 

@@ -6,7 +6,7 @@ import {
   CalendarDays, Rows3, Filter, ChevronDown, ChevronUp, Search,
   Download, Columns, FileText,
 } from 'lucide-react'
-import { fetchZSOReports, exportZSO, generateZSO, fetchEmails } from '../services/api'
+import { fetchZSOReports, exportZSO, generateZSO, fetchEmails, fetchReportVersions, fetchVersionChanges } from '../services/api'
 
 ModuleRegistry.registerModules([AllCommunityModule])
 
@@ -204,6 +204,97 @@ const ExportDropdown = ({ onCSV, onExcel, isAllReports, onClose }) => (
     </button>
   </div>
 )
+
+// ─── Version History panel ──────────────────────────────────────────────────
+function VersionHistory({ reportId }) {
+  const [versions, setVersions] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [openVid, setOpenVid] = useState(null)
+  const [changes, setChanges] = useState({})   // versionId -> change rows
+
+  useEffect(() => {
+    let alive = true
+    setLoading(true); setOpenVid(null)
+    fetchReportVersions(reportId)
+      .then(r => { if (alive) setVersions(r.data?.versions || []) })
+      .catch(() => { if (alive) setVersions([]) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [reportId])
+
+  const toggle = async (v) => {
+    if (openVid === v.version_id) { setOpenVid(null); return }
+    setOpenVid(v.version_id)
+    if (!changes[v.version_id]) {
+      try {
+        const res = await fetchVersionChanges(v.version_id)
+        setChanges(prev => ({ ...prev, [v.version_id]: res.data || [] }))
+      } catch { setChanges(prev => ({ ...prev, [v.version_id]: [] })) }
+    }
+  }
+
+  if (loading) return null
+  if (!versions.length) return null   // report not part of a tracked chain (e.g. pre-versioning)
+
+  return (
+    <div className="mt-3 pt-3 border-t border-gray-100">
+      <p className="text-[11px] text-gray-400 uppercase tracking-wide mb-2">Version history</p>
+      <div className="flex flex-col gap-1.5">
+        {versions.map(v => (
+          <div key={v.version_id} className="border border-gray-200 rounded-lg overflow-hidden">
+            <button onClick={() => toggle(v)} disabled={v.is_base}
+              className={`w-full flex flex-wrap items-center gap-2 px-3 py-2 text-left text-sm ${v.is_base ? 'cursor-default' : 'hover:bg-gray-50'}`}>
+              <span className="font-semibold text-gray-800">v{v.version_number}</span>
+              {v.is_base && <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">base</span>}
+              <span className="text-[11px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 capitalize">{v.source || '—'}</span>
+              {v.is_base ? (
+                <span className="text-xs text-gray-500">{v.total_rows} rows (base)</span>
+              ) : (
+                <span className="text-xs text-gray-500">
+                  <span className="text-green-600">+{v.added_rows} added</span> ·{' '}
+                  <span className="text-amber-600">{v.modified_rows} modified</span> ·{' '}
+                  <span className="text-red-600">{v.removed_rows} removed</span> ·{' '}
+                  <span className="text-gray-400">{v.unchanged_rows} unchanged</span>
+                </span>
+              )}
+              <span className="ml-auto text-[11px] text-gray-400">
+                {v.created_at ? new Date(v.created_at).toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) : ''}
+              </span>
+              {!v.is_base && <ChevronDown size={14} className={`text-gray-400 transition-transform ${openVid===v.version_id?'rotate-180':''}`} />}
+            </button>
+            {openVid === v.version_id && (
+              <div className="border-t border-gray-100 bg-gray-50 px-3 py-2 max-h-64 overflow-y-auto">
+                {(changes[v.version_id] || []).length === 0 ? (
+                  <p className="text-xs text-gray-400">No detailed changes recorded.</p>
+                ) : (
+                  <table className="w-full text-xs">
+                    <thead><tr className="text-gray-400 text-left">
+                      <th className="py-1 pr-3">Part</th><th className="py-1 pr-3">Change</th>
+                      <th className="py-1 pr-3">Field</th><th className="py-1 pr-3">Old</th><th className="py-1">New</th>
+                    </tr></thead>
+                    <tbody>
+                      {(changes[v.version_id] || []).map((c, i) => (
+                        <tr key={i} className="border-t border-gray-100">
+                          <td className="py-1 pr-3 font-mono text-gray-700">{c.cust_part_no || '—'}</td>
+                          <td className="py-1 pr-3">
+                            <span className={`px-1.5 py-0.5 rounded ${c.change_type==='added'?'bg-green-100 text-green-700':c.change_type==='removed'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700'}`}>{c.change_type}</span>
+                          </td>
+                          <td className="py-1 pr-3 text-gray-600">{c.field_name || '—'}</td>
+                          <td className="py-1 pr-3 text-gray-500">{c.old_value || '—'}</td>
+                          <td className="py-1 text-gray-800 font-medium">{c.new_value || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 // ─── Main component ────────────────────────────────────────────────────────
 
@@ -612,6 +703,7 @@ export default function ZSOReports() {
                 ))}
               </div>
             )}
+            {selectedReport && <VersionHistory reportId={selectedReport.id} />}
           </div>
 
           {/* Forecast schedule preview */}

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { Search, Plus, Pencil, Trash2, X, Upload, RefreshCw, TrendingUp, Calendar, ChevronDown, ChevronRight } from 'lucide-react'
 import { fetchMasterData, createMasterData, updateMasterData, deleteMasterData, uploadMasterData, fetchForexRates, addForexRate, deleteForexRate, fetchForecastSummary, fetchForecastParts, uploadForecastFile, deleteForecastCustomer } from '../services/api'
 
-const emptyForm = { customer_name: '', customer_location: '', customer_part_no: '', maini_part_no: '', description: '', country: '', unit_price: '', currency: 'INR', hsn_code: '' }
+const emptyForm = { customer_name: '', customer_location: '', sold_to_party: '', ship_to_party: '', customer_part_no: '', maini_part_no: '', description: '', country: '', unit_price: '', currency: 'INR', incoterm: '', hsn_code: '' }
 const emptyForexForm = { currency_from: 'USD', currency_to: 'INR', rate: '', effective_date: '', notes: '' }
 // Supported source currencies for conversion to INR
 const FOREX_FROM_CURRENCIES = ['USD', 'EUR', 'GBP']
@@ -19,6 +19,8 @@ export default function MasterData() {
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef(null)
   const [activeTab, setActiveTab] = useState('parts')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(25)
 
   // Forecast state
   const [forecastSummary, setForecastSummary] = useState([])
@@ -194,6 +196,16 @@ export default function MasterData() {
       (d.country || '').toLowerCase().includes(search.toLowerCase())
   )
 
+  // Sold To / Ship To columns show only when at least one row has a value.
+  const showSoldTo = data.some((d) => (d.sold_to_party || '').toString().trim())
+  const showShipTo = data.some((d) => (d.ship_to_party || '').toString().trim())
+
+  // Pagination (Customer list can be ~1500 rows → avoid endless scroll)
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const pageSafe = Math.min(page, totalPages)
+  const paged = filtered.slice((pageSafe - 1) * pageSize, pageSafe * pageSize)
+  useEffect(() => { setPage(1) }, [search, pageSize])
+
   const openAdd = () => {
     setEditItem(null)
     setForm(emptyForm)
@@ -205,12 +217,15 @@ export default function MasterData() {
     setForm({
       customer_name: item.customer_name || '',
       customer_location: item.customer_location || '',
+      sold_to_party: item.sold_to_party || '',
+      ship_to_party: item.ship_to_party || '',
       customer_part_no: item.customer_part_no || '',
       maini_part_no: item.maini_part_no || '',
       description: item.description || '',
       country: item.country || '',
       unit_price: item.unit_price != null ? String(item.unit_price) : '',
       currency: item.currency || 'INR',
+      incoterm: item.incoterm || '',
       hsn_code: item.hsn_code || '',
     })
     setShowModal(true)
@@ -352,7 +367,12 @@ export default function MasterData() {
         <table className="w-full">
           <thead>
             <tr className="border-b border-gray-100">
-              {['Customer Name', 'Location', 'Customer Part #', 'Maini Part #', 'Description', 'Country', 'Actions'].map(
+              {[
+                'S No', 'Customer Name', 'Location',
+                ...(showSoldTo ? ['Sold To Party'] : []),
+                ...(showShipTo ? ['Ship To Party'] : []),
+                'Customer Part #', 'Maini Part #', 'Description', 'Country', 'Incoterm', 'Actions',
+              ].map(
                 (h) => (
                   <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3 whitespace-nowrap">
                     {h}
@@ -364,19 +384,23 @@ export default function MasterData() {
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-6 py-8 text-center text-sm text-gray-500">
+                <td colSpan={9 + (showSoldTo ? 1 : 0) + (showShipTo ? 1 : 0)} className="px-6 py-8 text-center text-sm text-gray-500">
                   No master data entries. Upload an Excel file or click "Add Entry".
                 </td>
               </tr>
             ) : (
-              filtered.map((row) => (
+              paged.map((row, idx) => (
                 <tr key={row.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
+                  <td className="px-4 py-3.5 text-sm text-gray-400 whitespace-nowrap">{(pageSafe - 1) * pageSize + idx + 1}</td>
                   <td className="px-4 py-3.5 text-sm font-medium text-gray-900 whitespace-nowrap">{row.customer_name || '-'}</td>
                   <td className="px-4 py-3.5 text-sm text-gray-600 whitespace-nowrap">{row.customer_location || '-'}</td>
+                  {showSoldTo && <td className="px-4 py-3.5 text-sm text-gray-600 whitespace-nowrap">{row.sold_to_party || '-'}</td>}
+                  {showShipTo && <td className="px-4 py-3.5 text-sm text-gray-600 whitespace-nowrap">{row.ship_to_party || '-'}</td>}
                   <td className="px-4 py-3.5 text-sm text-gray-600">{row.customer_part_no}</td>
                   <td className="px-4 py-3.5 text-sm text-gray-600">{row.maini_part_no}</td>
                   <td className="px-4 py-3.5 text-sm text-gray-600">{row.description || '-'}</td>
                   <td className="px-4 py-3.5 text-sm text-gray-600">{row.country || '-'}</td>
+                  <td className="px-4 py-3.5 text-sm text-gray-600">{row.incoterm || '-'}</td>
                   <td className="px-4 py-3.5">
                     <div className="flex items-center gap-2">
                       <button onClick={() => openEdit(row)} className="p-1.5 rounded hover:bg-gray-100 text-gray-500">
@@ -393,6 +417,33 @@ export default function MasterData() {
           </tbody>
         </table>
       </div>
+
+      {/* Pagination */}
+      {filtered.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 mt-3 text-sm text-gray-600">
+          <div className="flex items-center gap-2">
+            <span>Rows per page:</span>
+            <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
+              className="border border-gray-200 rounded-md px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+              {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+            <span className="text-gray-400">
+              {(pageSafe - 1) * pageSize + 1}–{Math.min(pageSafe * pageSize, filtered.length)} of {filtered.length}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setPage(1)} disabled={pageSafe <= 1}
+              className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">« First</button>
+            <button onClick={() => setPage(pageSafe - 1)} disabled={pageSafe <= 1}
+              className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">‹ Prev</button>
+            <span className="px-2">Page {pageSafe} of {totalPages}</span>
+            <button onClick={() => setPage(pageSafe + 1)} disabled={pageSafe >= totalPages}
+              className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">Next ›</button>
+            <button onClick={() => setPage(totalPages)} disabled={pageSafe >= totalPages}
+              className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">Last »</button>
+          </div>
+        </div>
+      )}
 
       </> }
 
@@ -688,12 +739,15 @@ export default function MasterData() {
               {[
                 { key: 'customer_name', label: 'Customer Name' },
                 { key: 'customer_location', label: 'Customer Location' },
+                { key: 'sold_to_party', label: 'Sold To Party' },
+                { key: 'ship_to_party', label: 'Ship To Party' },
                 { key: 'customer_part_no', label: 'Customer Part #' },
                 { key: 'maini_part_no', label: 'Maini Part #' },
                 { key: 'description', label: 'Description' },
                 { key: 'country', label: 'Country' },
                 { key: 'unit_price', label: 'Unit Price', type: 'number' },
                 { key: 'currency', label: 'Currency' },
+                { key: 'incoterm', label: 'Incoterm' },
                 { key: 'hsn_code', label: 'HSN Code' },
               ].map(({ key, label, type }) => (
                 <div key={key} className={key === 'description' ? 'col-span-2' : ''}>

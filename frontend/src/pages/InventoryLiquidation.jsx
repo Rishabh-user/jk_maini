@@ -1,15 +1,17 @@
 import { useState, useEffect, useRef } from 'react'
 import { Package, Layers, Upload, Download, Filter, RefreshCw, CheckCircle2, AlertCircle, Loader2, Trash2 } from 'lucide-react'
-import { fetchInventorySummary, uploadStockFile, runAllocation, fetchAllocations, fetchAllocationDetail, deleteStock, deleteAllocations } from '../services/api'
+import { fetchInventorySummary, uploadStockFile, runAllocation, fetchAllocations, fetchAllocationDetail, deleteStock, deleteAllocations, fetchFgLiquidation, fetchVmiSafety } from '../services/api'
 
 const TABS = [
+  { id: 'liquidation', label: 'FG Liquidation' },
+  { id: 'vmi', label: 'VMI & Safety Stock' },
   { id: 'fg', label: 'FG Allocation' },
   { id: 'wip', label: 'WIP Allocation' },
   { id: 'reports', label: 'Liquidation Reports' },
 ]
 
 export default function InventoryLiquidation() {
-  const [activeTab, setActiveTab] = useState('fg')
+  const [activeTab, setActiveTab] = useState('liquidation')
   const [summary, setSummary] = useState(null)
 
   useEffect(() => {
@@ -25,39 +27,29 @@ export default function InventoryLiquidation() {
     }
   }
 
-  const latestSummary = summary?.latest_summary || {}
+  const cats = summary?.categories || {}
+  const catCard = (key) => ({ qty: cats[key]?.qty ?? 0, parts: cats[key]?.parts ?? 0 })
+  const fg = catCard('fg'), child = catCard('child'), wip = catCard('wip'), rm = catCard('rm')
 
   return (
     <div>
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Inventory Liquidation</h1>
         <p className="text-sm text-gray-500 mt-1">
-          FG & WIP allocation against demand — stock status and liquidation reporting
+          Stock on hand by category, allocation against demand, and liquidation reporting
         </p>
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-        <SummaryCard
-          icon={Package} label="Total FG Stock"
-          value={`${summary?.stocks?.fg_inhouse?.rows || 0} + ${summary?.stocks?.fg_warehouse?.rows || 0}`}
-          sub="In-house + Warehouse rows" color="blue"
-        />
-        <SummaryCard
-          icon={Layers} label="Total WIP"
-          value={String(summary?.stocks?.wip?.rows || 0)}
-          sub="Work in Progress rows" color="purple"
-        />
-        <SummaryCard
-          icon={CheckCircle2} label="Fully Allocated"
-          value={String(latestSummary.fully_allocated ?? '—')}
-          sub="Full stock parts" color="green"
-        />
-        <SummaryCard
-          icon={AlertCircle} label="Partial / No Stock"
-          value={String((latestSummary.partial ?? 0) + (latestSummary.no_stock ?? 0) || '—')}
-          sub="Coverage gaps" color="orange"
-        />
+      {/* Stock-on-hand snapshot — all four categories from the new classification */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <SummaryCard icon={Package} label="Finished Goods"
+          value={fmtNum(fg.qty)} sub={`${fmtNum(fg.parts)} parts on hand`} color="blue" />
+        <SummaryCard icon={Layers} label="Child Parts"
+          value={fmtNum(child.qty)} sub={`${fmtNum(child.parts)} parts on hand`} color="purple" />
+        <SummaryCard icon={Layers} label="Work in Progress"
+          value={fmtNum(wip.qty)} sub={`${fmtNum(wip.parts)} parts on hand`} color="orange" />
+        <SummaryCard icon={Package} label="Raw Material"
+          value={fmtNum(rm.qty)} sub={`${fmtNum(rm.parts)} parts on hand`} color="green" />
       </div>
 
       {/* Tabs */}
@@ -77,6 +69,8 @@ export default function InventoryLiquidation() {
         ))}
       </div>
 
+      {activeTab === 'liquidation' && <FGLiquidation />}
+      {activeTab === 'vmi' && <VmiSafety />}
       {activeTab === 'fg' && <FGAllocation onRefresh={loadSummary} />}
       {activeTab === 'wip' && <WIPAllocation onRefresh={loadSummary} />}
       {activeTab === 'reports' && <LiquidationReports />}
@@ -95,6 +89,364 @@ function SummaryCard({ icon: Icon, label, value, sub, color }) {
       </div>
       <p className="text-2xl font-bold text-gray-900">{value}</p>
       <p className="text-xs text-gray-500 mt-1">{sub}</p>
+    </div>
+  )
+}
+
+const fmtNum = (n) => (n == null ? '—' : Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 }))
+const fmtMoney = (n, cur) => (n == null ? '—' : `${cur === 'INR' ? '₹' : cur + ' '}${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`)
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const fmtMonth = (m) => {
+  if (!m || m === 'unscheduled') return 'Unscheduled'
+  const [y, mo] = m.split('-')
+  return mo ? `${MONTH_NAMES[+mo - 1]} ${y}` : m
+}
+
+const PAGE_SIZE = 50
+
+function FGLiquidation() {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [search, setSearch] = useState('')
+  const [zsoId, setZsoId] = useState('')          // '' = latest
+  const [scope, setScope] = useState('report')     // 'report' | 'all'
+  const [page, setPage] = useState(1)
+
+  useEffect(() => { load() }, [zsoId, scope])
+
+  const load = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetchFgLiquidation(zsoId || undefined, scope)
+      setData(res.data)
+      setPage(1)
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const filtered = (data?.rows || []).filter((r) => {
+    if (statusFilter !== 'all' && r.status !== statusFilter) return false
+    if (search) {
+      const q = search.toLowerCase()
+      if (!(`${r.maini_part_no} ${r.cust_part_no} ${r.customer} ${r.description}`.toLowerCase().includes(q))) return false
+    }
+    return true
+  })
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const pageSafe = Math.min(page, pageCount)
+  const rows = filtered.slice((pageSafe - 1) * PAGE_SIZE, pageSafe * PAGE_SIZE)
+
+  const t = data?.totals || {}
+  const months = data?.months || []
+  const valueParts = Object.entries(data?.value_by_currency || {})
+  const reports = data?.available_reports || []
+  const COLS = 15   // fixed columns before month columns
+
+  const STATUS_STYLE = {
+    surplus: 'bg-blue-100 text-blue-700',
+    covered: 'bg-green-100 text-green-700',
+    short: 'bg-red-100 text-red-700',
+    no_demand: 'bg-gray-100 text-gray-600',
+  }
+  const STATUS_LABEL = { surplus: 'Surplus', covered: 'Covered', short: 'Backlog', no_demand: 'No Demand' }
+
+  return (
+    <div className="space-y-6">
+      {/* Summary strip */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        <SummaryCard icon={Package} label="Total FG Qty" value={fmtNum(t.fg)} sub={`Plant ${fmtNum(t.fg_plant)} · WH ${fmtNum(t.fg_warehouse)}`} color="blue" />
+        <SummaryCard icon={Download} label="FG Value"
+          value={valueParts.length ? valueParts.map(([c, v]) => fmtMoney(v, c)).join(' · ') : '—'}
+          sub={`${data?.coverage?.priced_parts || 0} priced · ${data?.coverage?.unpriced_parts || 0} unpriced`} color="green" />
+        <SummaryCard icon={Layers} label="Child / WIP Qty" value={`${fmtNum(t.child)} / ${fmtNum(t.wip)}`} sub="Support stock" color="purple" />
+        <SummaryCard icon={CheckCircle2} label="Surplus Qty" value={fmtNum(t.surplus)} sub="FG above PO demand (liquidatable)" color="blue" />
+        <SummaryCard icon={AlertCircle} label="Backlog Qty" value={fmtNum(t.backlog)} sub="PO demand above FG (shortfall)" color="orange" />
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">FG Liquidation — Part-wise</h2>
+            <p className="text-sm text-gray-500">
+              Firm <b>PO demand</b> drives status; <b>Forecast</b> is informational only.
+              {data?.demand_source?.zso_report_id ? ` · demand from ZSO #${data.demand_source.zso_report_id}` : ' · no ZSO demand loaded'}
+              {` · ${scope === 'report' ? 'parts in this report' : 'all stock parts'}`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* ZSO selector */}
+            <select value={zsoId} onChange={(e) => setZsoId(e.target.value)}
+              title="Demand source report"
+              className="px-3 py-2 text-sm border border-gray-200 rounded-lg max-w-[180px]">
+              <option value="">Latest ZSO</option>
+              {reports.map((r) => (
+                <option key={r.id} value={r.id}>{r.label}{r.at ? ` · ${r.at.split('T')[0]}` : ''}</option>
+              ))}
+            </select>
+            {/* Scope toggle */}
+            <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs font-medium">
+              <button onClick={() => setScope('report')}
+                className={`px-3 py-2 ${scope === 'report' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`}>
+                This report
+              </button>
+              <button onClick={() => setScope('all')}
+                className={`px-3 py-2 ${scope === 'all' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`}>
+                All stock
+              </button>
+            </div>
+            <input
+              value={search} onChange={(e) => { setSearch(e.target.value); setPage(1) }}
+              placeholder="Search part / customer…"
+              className="px-3 py-2 text-sm border border-gray-200 rounded-lg w-44"
+            />
+            <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1) }}
+              className="px-3 py-2 text-sm border border-gray-200 rounded-lg">
+              <option value="all">All statuses</option>
+              <option value="surplus">Surplus</option>
+              <option value="covered">Covered</option>
+              <option value="short">Backlog</option>
+              <option value="no_demand">No Demand</option>
+            </select>
+            <button onClick={load} disabled={loading}
+              className="flex items-center gap-2 px-3 py-2 text-xs font-medium border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50">
+              {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        {error && <div className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">{error}</div>}
+
+        <div className="border border-gray-200 rounded-lg overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                {['Maini Part #', 'Cust Part #', 'Customer', 'FG Qty', 'Plant', 'WH', 'Child', 'WIP', 'Unit Price', 'FG Value', 'PO Demand', 'Forecast', 'Surplus', 'Backlog', 'Status'].map((h) => (
+                  <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-3 py-3 whitespace-nowrap">{h}</th>
+                ))}
+                {months.map((m) => (
+                  <th key={m} className="text-right text-xs font-semibold text-gray-400 px-3 py-3 whitespace-nowrap">{fmtMonth(m)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={COLS + months.length} className="px-6 py-8 text-center"><Loader2 size={20} className="mx-auto text-blue-500 animate-spin" /></td></tr>
+              ) : rows.length > 0 ? (
+                rows.map((r, i) => (
+                  <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="px-3 py-2 font-medium whitespace-nowrap">{r.maini_part_no}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">{r.cust_part_no || '—'}</td>
+                    <td className="px-3 py-2 whitespace-nowrap max-w-[160px] truncate" title={r.customer}>{r.customer || '—'}</td>
+                    <td className="px-3 py-2 text-right font-medium">{fmtNum(r.fg_qty)}</td>
+                    <td className="px-3 py-2 text-right text-gray-500">{fmtNum(r.fg_plant)}</td>
+                    <td className="px-3 py-2 text-right text-gray-500">{fmtNum(r.fg_warehouse)}</td>
+                    <td className="px-3 py-2 text-right text-gray-500">{fmtNum(r.child_qty)}</td>
+                    <td className="px-3 py-2 text-right text-gray-500">{fmtNum(r.wip_qty)}</td>
+                    <td className="px-3 py-2 text-right text-gray-500">{r.unit_price == null ? '—' : fmtMoney(r.unit_price, r.currency)}</td>
+                    <td className="px-3 py-2 text-right font-medium">{r.fg_value == null ? '—' : fmtMoney(r.fg_value, r.currency)}</td>
+                    <td className="px-3 py-2 text-right">{fmtNum(r.demand_qty)}</td>
+                    <td className="px-3 py-2 text-right text-gray-400" title="Forecast — informational, does not affect status">{r.forecast_qty > 0 ? fmtNum(r.forecast_qty) : '—'}</td>
+                    <td className="px-3 py-2 text-right text-blue-600">{r.surplus_qty > 0 ? fmtNum(r.surplus_qty) : '—'}</td>
+                    <td className="px-3 py-2 text-right text-red-600">{r.backlog_qty > 0 ? fmtNum(r.backlog_qty) : '—'}</td>
+                    <td className="px-3 py-2">
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap ${STATUS_STYLE[r.status]}`}>{STATUS_LABEL[r.status]}</span>
+                      {r.forecast_qty > 0 && <span className="ml-1 text-[10px] text-gray-400" title="Has forecast demand">fcst</span>}
+                    </td>
+                    {months.map((m) => (
+                      <td key={m} className="px-3 py-2 text-right text-gray-500">{r.monthly_demand?.[m] ? fmtNum(r.monthly_demand[m]) : ''}</td>
+                    ))}
+                  </tr>
+                ))
+              ) : (
+                <tr><td colSpan={COLS + months.length} className="px-6 py-10 text-center text-sm text-gray-500">
+                  {!data
+                    ? 'Loading…'
+                    : (data.rows?.length || 0) === 0
+                      ? (scope === 'report'
+                          ? 'This ZSO has no PO/forecast lines, or no stock is loaded. Try "All stock", or pick another report.'
+                          : 'No stock or demand loaded yet. Upload a stock file in the FG Allocation tab, then Refresh.')
+                      : 'No parts match your search or status filter.'}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Legend + pagination */}
+        <div className="flex items-center gap-4 mt-4 flex-wrap">
+          {Object.entries(STATUS_LABEL).map(([k, label]) => (
+            <div key={k} className="flex items-center gap-1.5">
+              <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLE[k]}`}>{label}</span>
+              <span className="text-xs text-gray-500">({data?.status_counts?.[k] ?? 0})</span>
+            </div>
+          ))}
+          <span className="text-xs text-gray-400 ml-auto">PO demand drives status · Forecast is informational</span>
+        </div>
+
+        {filtered.length > PAGE_SIZE && (
+          <div className="flex items-center justify-between mt-4 text-sm">
+            <span className="text-gray-500">
+              Showing {(pageSafe - 1) * PAGE_SIZE + 1}–{Math.min(pageSafe * PAGE_SIZE, filtered.length)} of {filtered.length}
+            </span>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setPage(1)} disabled={pageSafe === 1}
+                className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">« First</button>
+              <button onClick={() => setPage(pageSafe - 1)} disabled={pageSafe === 1}
+                className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">‹ Prev</button>
+              <span className="px-2 text-gray-600">Page {pageSafe} / {pageCount}</span>
+              <button onClick={() => setPage(pageSafe + 1)} disabled={pageSafe === pageCount}
+                className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">Next ›</button>
+              <button onClick={() => setPage(pageCount)} disabled={pageSafe === pageCount}
+                className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">Last »</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function VmiSafety() {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => { load() }, [])
+
+  const load = async () => {
+    setLoading(true); setError('')
+    try {
+      const res = await fetchVmiSafety()
+      setData(res.data)
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const vmi = data?.vmi || {}
+  const safety = data?.safety || {}
+  const VMI_STYLE = { below_min: 'bg-red-100 text-red-700', in_band: 'bg-green-100 text-green-700', above_max: 'bg-blue-100 text-blue-700' }
+  const VMI_LABEL = { below_min: 'Below Min', in_band: 'In Band', above_max: 'Above Max' }
+
+  return (
+    <div className="space-y-6">
+      {/* Read-only: files are uploaded in Demand Management */}
+      <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800 flex items-center justify-between flex-wrap gap-2">
+        <span>
+          📄 Analysis of VMI &amp; Safety Stock <b>uploaded in Demand Management → VMI &amp; Safety Stock</b>.
+          {' '}Sources: {vmi.source || 'no VMI file'} · {safety.source || 'no Safety file'}.
+          {' '}<span className="text-blue-600">(Will move into the Coverage Report.)</span>
+        </span>
+        <button onClick={load} disabled={loading}
+          className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium border border-blue-200 rounded-lg bg-white hover:bg-blue-50 disabled:opacity-50">
+          {loading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Refresh
+        </button>
+      </div>
+
+      {error && <div className="p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">{error}</div>}
+
+      {/* VMI section */}
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">VMI — Min/Max vs FG on hand</h2>
+            <p className="text-sm text-gray-500">{vmi.total || 0} parts · <span className="text-red-600 font-medium">{vmi.below_min || 0} below min</span> (replenish)</p>
+          </div>
+          <button onClick={load} disabled={loading} className="flex items-center gap-2 px-3 py-2 text-xs font-medium border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50">
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} Refresh
+          </button>
+        </div>
+        <div className="border border-gray-200 rounded-lg overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="bg-gray-50 border-b border-gray-200">
+              {['Maini Part #', 'Cust Part #', 'Min', 'Max', 'FG On Hand', 'Replenish to Max', 'Status'].map((h) => (
+                <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-3 py-3 whitespace-nowrap">{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {(vmi.rows || []).length > 0 ? vmi.rows.map((r, i) => (
+                <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                  <td className="px-3 py-2 font-medium">{r.maini_part_no}</td>
+                  <td className="px-3 py-2">{r.cust_part_no || '—'}</td>
+                  <td className="px-3 py-2 text-right">{fmtNum(r.min_qty)}</td>
+                  <td className="px-3 py-2 text-right">{fmtNum(r.max_qty)}</td>
+                  <td className="px-3 py-2 text-right font-medium">{fmtNum(r.fg_qty)}</td>
+                  <td className="px-3 py-2 text-right text-red-600">{r.replenish_to_max > 0 ? fmtNum(r.replenish_to_max) : '—'}</td>
+                  <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${VMI_STYLE[r.status]}`}>{VMI_LABEL[r.status]}</span></td>
+                </tr>
+              )) : (
+                <tr><td colSpan={7} className="px-6 py-8 text-center text-sm text-gray-500">Upload a VMI file to see the Min/Max replenishment view.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Safety stock section */}
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <div className="mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">Safety Stock — Customer-facing</h2>
+          <p className="text-sm text-gray-500">
+            {safety.total || 0} parts · <span className="text-red-600 font-medium">{safety.short || 0} short</span> of safety level
+          </p>
+          {safety.note && <p className="text-xs text-amber-600 mt-1">⚠ {safety.note}</p>}
+        </div>
+
+        {/* by-customer segregation */}
+        {safety.by_customer && Object.keys(safety.by_customer).length > 0 && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            {Object.entries(safety.by_customer).map(([cust, g]) => (
+              <div key={cust} className="border border-gray-200 rounded-lg p-3">
+                <p className="text-sm font-semibold text-gray-900 truncate" title={cust}>{cust}</p>
+                <p className="text-xs text-gray-500">{g.parts} parts · safety {fmtNum(g.safety_qty)}</p>
+                {g.short > 0 && <p className="text-xs text-red-600">{g.short} short</p>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="border border-gray-200 rounded-lg overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="bg-gray-50 border-b border-gray-200">
+              {['Maini Part #', 'Cust Part #', 'Customer', 'KAS', 'Site', 'Safety Qty', 'FG On Hand', 'Shortfall', 'Status'].map((h) => (
+                <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-3 py-3 whitespace-nowrap">{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {(safety.rows || []).length > 0 ? safety.rows.slice(0, 200).map((r, i) => (
+                <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                  <td className="px-3 py-2 font-medium">{r.maini_part_no}</td>
+                  <td className="px-3 py-2">{r.cust_part_no || '—'}</td>
+                  <td className="px-3 py-2 max-w-[140px] truncate" title={r.customer}>{r.customer}</td>
+                  <td className="px-3 py-2">{r.kas || '—'}</td>
+                  <td className="px-3 py-2">{r.site || '—'}</td>
+                  <td className="px-3 py-2 text-right">{fmtNum(r.safety_qty)}</td>
+                  <td className="px-3 py-2 text-right font-medium">{fmtNum(r.fg_qty)}</td>
+                  <td className="px-3 py-2 text-right text-red-600">{r.shortfall > 0 ? fmtNum(r.shortfall) : '—'}</td>
+                  <td className="px-3 py-2">
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${r.status === 'short' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                      {r.status === 'short' ? 'Short' : 'Met'}
+                    </span>
+                  </td>
+                </tr>
+              )) : (
+                <tr><td colSpan={9} className="px-6 py-8 text-center text-sm text-gray-500">Upload a Safety Stock file to see coverage vs safety levels.</td></tr>
+              )}
+            </tbody>
+          </table>
+          {(safety.rows || []).length > 200 && <p className="text-xs text-gray-400 p-2 text-center">Showing first 200 of {safety.rows.length} rows.</p>}
+        </div>
+      </div>
     </div>
   )
 }
@@ -138,11 +490,10 @@ function FGAllocation({ onRefresh }) {
   }
 
   const handleClearAll = async () => {
-    if (!window.confirm('Delete all FG stock data and allocation results? This cannot be undone.')) return
+    if (!window.confirm('Delete all stock data and allocation results? This cannot be undone.')) return
     setClearing(true)
     try {
-      await deleteStock('fg_inhouse')
-      await deleteStock('fg_warehouse')
+      await deleteStock()            // stock is auto-classified now — clear all
       await deleteAllocations()
       setAllocResult(null)
       setUploadResults({})
@@ -352,10 +703,10 @@ function WIPAllocation({ onRefresh }) {
   }
 
   const handleClearWIP = async () => {
-    if (!window.confirm('Delete all WIP stock data and WIP allocation results?')) return
+    if (!window.confirm('Delete all WIP stock data and allocation results?')) return
     setClearing(true)
     try {
-      await deleteStock('wip')
+      await deleteStock('wip')       // WIP uploads are tagged 'wip'
       await deleteAllocations()
       setAllocResult(null)
       setUploadResult(null)

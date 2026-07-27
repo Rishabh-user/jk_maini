@@ -3,7 +3,8 @@ from app.models.email import Email, EmailStatus, Attachment
 from app.models.data import (
     RawData, MainiPart, ZSOReport, ForexRate, ForecastEntry,
     DemandUpload, InventoryStock, AllocationResult,
-    CoverageReport, SalesData, BudgetData, MasterDataCorrection, DemandFollowUp,
+    CoverageReport, SalesData, BudgetData, MasterDataCorrection, DemandFollowUp, DemandLine,
+    ReportVersion, ReportChange,
 )
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "Email", "EmailStatus", "Attachment",
     "RawData", "MainiPart", "ZSOReport", "ForexRate", "ForecastEntry",
     "DemandUpload", "InventoryStock", "AllocationResult",
-    "CoverageReport", "SalesData", "BudgetData", "MasterDataCorrection", "DemandFollowUp",
+    "CoverageReport", "SalesData", "BudgetData", "MasterDataCorrection", "DemandFollowUp", "DemandLine",
+    "ReportVersion", "ReportChange",
 ]

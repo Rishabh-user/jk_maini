@@ -161,11 +161,29 @@ async def compare_demand(
     new_items = []
     removed_items = []
 
+    def _price_inr(item: dict) -> float:
+        try:
+            return float(item.get("unit_price_inr") or item.get("unit_price") or 0)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _month_key(item: dict) -> str:
+        """Sortable YYYY-MM ship-month bucket ('Unscheduled' when absent)."""
+        s = str(item.get("ship_date") or item.get("sales_month") or "").strip()
+        if not s:
+            return "Unscheduled"
+        try:
+            from dateutil import parser as _dp
+            return _dp.parse(s).strftime("%Y-%m")
+        except Exception:
+            return "Unscheduled"
+
     for key, curr in curr_items.items():
         if not key:
             continue
         curr_qty = float(curr.get("open_qty", curr.get("quantity", 0)) or 0)
         part = curr.get("cust_part_no", curr.get("customer_part_no", key))
+        price = _price_inr(curr)
         if key in prev_items:
             prev = prev_items[key]
             prev_qty = float(prev.get("open_qty", prev.get("quantity", 0)) or 0)
@@ -173,19 +191,28 @@ async def compare_demand(
             # Abrupt = relative swing beyond threshold → needs customer follow-up
             rel = abs(diff) / (prev_qty if prev_qty else 1.0)
             abrupt = rel > ABRUPT_CHANGE_THRESHOLD
+            base = {"part": part, "maini_part_no": curr.get("maini_part_no", ""), "customer": curr.get("customer_name", ""),
+                    "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "value_change": round(diff * price, 2),
+                    "abrupt": abrupt, "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""),
+                    "month": _month_key(curr), "row_id": key}
             if diff > 0:
-                increases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "abrupt": abrupt, "change_type": "increase", "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
+                increases.append({**base, "change_type": "increase"})
             elif diff < 0:
-                decreases.append({"part": part, "customer": curr.get("customer_name", ""), "prev_qty": prev_qty, "curr_qty": curr_qty, "change": diff, "abrupt": abrupt, "change_type": "decrease", "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
+                decreases.append({**base, "change_type": "drop"})
         else:
             # A brand-new line is inherently an abrupt addition worth confirming
-            new_items.append({"part": part, "customer": curr.get("customer_name", ""), "qty": curr_qty, "abrupt": True, "change_type": "new", "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "row_id": key})
+            new_items.append({"part": part, "maini_part_no": curr.get("maini_part_no", ""), "customer": curr.get("customer_name", ""),
+                              "qty": curr_qty, "value": round(curr_qty * price, 2), "abrupt": True, "change_type": "new",
+                              "po": curr.get("po_forecast", ""), "ship_date": curr.get("ship_date", ""), "month": _month_key(curr), "row_id": key})
 
     for key, prev in prev_items.items():
         if key and key not in curr_items:
             prev_qty = float(prev.get("open_qty", prev.get("quantity", 0)) or 0)
             part = prev.get("cust_part_no", prev.get("customer_part_no", key))
-            removed_items.append({"part": part, "customer": prev.get("customer_name", ""), "qty": prev_qty, "abrupt": True, "change_type": "removed", "po": prev.get("po_forecast", ""), "ship_date": prev.get("ship_date", ""), "row_id": key})
+            price = _price_inr(prev)
+            removed_items.append({"part": part, "maini_part_no": prev.get("maini_part_no", ""), "customer": prev.get("customer_name", ""),
+                                  "qty": prev_qty, "value": round(prev_qty * price, 2), "abrupt": True, "change_type": "removed",
+                                  "po": prev.get("po_forecast", ""), "ship_date": prev.get("ship_date", ""), "month": _month_key(prev), "row_id": key})
 
     abrupt_count = (
         sum(1 for x in increases if x["abrupt"])
@@ -193,11 +220,67 @@ async def compare_demand(
         + len(new_items) + len(removed_items)
     )
 
+    # ── Client-style Drop / Increase aggregations ───────────────────────────
+    # Increase bucket = qty increases + new lines; Drop bucket = qty drops +
+    # removed lines. Grouped by customer and by ship-month, in qty AND value.
+    def _aggregate(dim: str) -> list[dict]:
+        groups: dict[str, dict] = {}
+
+        def add(k, inc_q, inc_v, drop_q, drop_v, item):
+            g = groups.setdefault(k, {"increase_qty": 0.0, "increase_value": 0.0,
+                                      "drop_qty": 0.0, "drop_value": 0.0, "parts": []})
+            g["increase_qty"] += inc_q; g["increase_value"] += inc_v
+            g["drop_qty"] += drop_q; g["drop_value"] += drop_v
+            g["parts"].append(item)
+
+        for x in increases:
+            add(x.get(dim) or "—", x["change"], x["value_change"], 0, 0, x)
+        for x in decreases:
+            add(x.get(dim) or "—", 0, 0, abs(x["change"]), abs(x["value_change"]), x)
+        for x in new_items:
+            add(x.get(dim) or "—", x["qty"], x["value"], 0, 0, x)
+        for x in removed_items:
+            add(x.get(dim) or "—", 0, 0, x["qty"], x["value"], x)
+
+        return [{
+            dim: k,
+            "increase_qty": round(g["increase_qty"], 2), "increase_value": round(g["increase_value"], 2),
+            "drop_qty": round(g["drop_qty"], 2), "drop_value": round(g["drop_value"], 2),
+            "net_qty": round(g["increase_qty"] - g["drop_qty"], 2),
+            "net_value": round(g["increase_value"] - g["drop_value"], 2),
+            "part_count": len(g["parts"]),
+            "parts": g["parts"],   # for later drill-down (expand a customer/month)
+        } for k, g in groups.items()]
+
+    customer_summary = sorted(_aggregate("customer"), key=lambda r: abs(r["net_value"]) or abs(r["net_qty"]), reverse=True)
+    monthly_summary = sorted(_aggregate("month"), key=lambda r: (r["month"] == "Unscheduled", r["month"]))
+
+    # Biggest movers first in the detail lists
+    increases.sort(key=lambda x: x["change"], reverse=True)
+    decreases.sort(key=lambda x: x["change"])   # most negative first
+
+    def _s(items, f):
+        return round(sum(f(i) for i in items), 2)
+    kpi = {
+        "increase_lines": len(increases), "drop_lines": len(decreases),
+        "new_lines": len(new_items), "removed_lines": len(removed_items),
+        "increase_qty": round(_s(increases, lambda x: x["change"]) + _s(new_items, lambda x: x["qty"]), 2),
+        "drop_qty": round(abs(_s(decreases, lambda x: x["change"])) + _s(removed_items, lambda x: x["qty"]), 2),
+        "increase_value": round(_s(increases, lambda x: x["value_change"]) + _s(new_items, lambda x: x["value"]), 2),
+        "drop_value": round(abs(_s(decreases, lambda x: x["value_change"])) + _s(removed_items, lambda x: x["value"]), 2),
+        "abrupt_changes": abrupt_count,
+    }
+    kpi["net_qty"] = round(kpi["increase_qty"] - kpi["drop_qty"], 2)
+    kpi["net_value"] = round(kpi["increase_value"] - kpi["drop_value"], 2)
+
     return {
         "increases": increases,
         "decreases": decreases,
         "new_items": new_items,
         "removed_items": removed_items,
+        "customer_summary": customer_summary,
+        "monthly_summary": monthly_summary,
+        "kpi": kpi,
         "summary": {
             "total_increases": len(increases),
             "total_decreases": len(decreases),
@@ -342,7 +425,13 @@ async def upload_demand_file(
 
     content = await file.read()
     try:
-        if ext == "csv":
+        # VMI / Safety-stock exports carry blank/title rows above the header,
+        # so detect the real header row instead of assuming row 0.
+        if upload_type in ("vmi", "safety_stock"):
+            from app.api.inventory import _parse_upload_with_header
+            must_have = ("min", "max", "part") if upload_type == "vmi" else ("maini part", "customer", "safety", "part")
+            df = _parse_upload_with_header(content, ext, must_have)
+        elif ext == "csv":
             df = pd.read_csv(io.BytesIO(content))
         else:
             df = pd.read_excel(io.BytesIO(content), engine="openpyxl" if ext == "xlsx" else "xlrd")
