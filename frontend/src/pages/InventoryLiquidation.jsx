@@ -1,6 +1,11 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { AgGridReact } from 'ag-grid-react'
+import { AllCommunityModule, ModuleRegistry, themeQuartz } from 'ag-grid-community'
 import { Package, Layers, Upload, Download, Filter, RefreshCw, CheckCircle2, AlertCircle, Loader2, Trash2 } from 'lucide-react'
-import { fetchInventorySummary, uploadStockFile, runAllocation, fetchAllocations, fetchAllocationDetail, deleteStock, deleteAllocations, fetchFgLiquidation, fetchVmiSafety } from '../services/api'
+import { fetchInventorySummary, uploadStockFile, runAllocation, fetchAllocations, fetchAllocationDetail, fetchLatestAllocation, deleteStock, deleteAllocations, fetchFgLiquidation, fetchVmiSafety } from '../services/api'
+import { useDialog } from '../components/DialogProvider'
+
+ModuleRegistry.registerModules([AllCommunityModule])
 
 const TABS = [
   { id: 'liquidation', label: 'FG Liquidation' },
@@ -103,6 +108,55 @@ const fmtMonth = (m) => {
 }
 
 const PAGE_SIZE = 50
+
+// Shared status pill for allocation rows (FG / WIP / Liquidation Reports) —
+// same three states everywhere: full / partial / no_stock.
+const ALLOC_STATUS_STYLE = { full: 'bg-green-100 text-green-700', partial: 'bg-yellow-100 text-yellow-700', no_stock: 'bg-red-100 text-red-700' }
+const ALLOC_STATUS_DOT = { full: 'bg-green-500', partial: 'bg-yellow-500', no_stock: 'bg-red-500' }
+const ALLOC_STATUS_LABEL = { full: 'Full', partial: 'Partial', no_stock: 'No Stock' }
+function AllocStatusBadge({ status }) {
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${ALLOC_STATUS_STYLE[status] || 'bg-gray-100 text-gray-600'}`}>
+      <span className={`w-2 h-2 rounded-full ${ALLOC_STATUS_DOT[status] || 'bg-gray-400'}`} />
+      {ALLOC_STATUS_LABEL[status] || status || '—'}
+    </span>
+  )
+}
+
+// Server-side pagination footer shared by FG Allocation / WIP Allocation /
+// Liquidation Reports — same UI + math as the Master Data page's footer.
+function GridPager({ total, page, pageSize, onPage, onPageSize }) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const pageSafe = Math.min(page, totalPages)
+  if (total === 0) return null
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 mt-3 text-sm text-gray-600">
+      <div className="flex items-center gap-2">
+        <span>Rows per page:</span>
+        <select value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))}
+          className="border border-gray-200 rounded-md px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+          {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <span className="text-gray-400">
+          {(pageSafe - 1) * pageSize + 1}–{Math.min(pageSafe * pageSize, total)} of {total}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <button onClick={() => onPage(1)} disabled={pageSafe <= 1}
+          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">« First</button>
+        <button onClick={() => onPage(pageSafe - 1)} disabled={pageSafe <= 1}
+          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">‹ Prev</button>
+        <span className="px-2">Page {pageSafe} of {totalPages}</span>
+        <button onClick={() => onPage(pageSafe + 1)} disabled={pageSafe >= totalPages}
+          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">Next ›</button>
+        <button onClick={() => onPage(totalPages)} disabled={pageSafe >= totalPages}
+          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">Last »</button>
+      </div>
+    </div>
+  )
+}
+
+const gridDefaultColDef = { sortable: true, resizable: true, cellStyle: { color: '#374151', fontSize: '13px', display: 'flex', alignItems: 'center' } }
 
 function FGLiquidation() {
   const [data, setData] = useState(null)
@@ -452,14 +506,35 @@ function VmiSafety() {
 }
 
 function FGAllocation({ onRefresh }) {
+  const dialog = useDialog()
   const [uploading, setUploading] = useState(null)
   const [uploadResults, setUploadResults] = useState({})
   const [allocating, setAllocating] = useState(false)
+  // Holds the latest FG allocation, fetched from the server — populated on
+  // mount (not just right after clicking "Run Allocation"), so navigating
+  // to this tab shows the existing result instead of an empty table.
   const [allocResult, setAllocResult] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [clearing, setClearing] = useState(false)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(25)
   const inhouseRef = useRef(null)
   const warehouseRef = useRef(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetchLatestAllocation('fg', (page - 1) * pageSize, pageSize)
+      setAllocResult(res.data?.id != null ? res.data : null)
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [page, pageSize])
+
+  useEffect(() => { load() }, [load])
 
   const handleUpload = async (file, stockType) => {
     if (!file) return
@@ -479,8 +554,9 @@ function FGAllocation({ onRefresh }) {
     setAllocating(true)
     setError('')
     try {
-      const res = await runAllocation('fg')
-      setAllocResult(res.data)
+      await runAllocation('fg')
+      setPage(1)
+      await load()
       onRefresh()
     } catch (err) {
       setError(err.response?.data?.detail || err.message)
@@ -490,13 +566,23 @@ function FGAllocation({ onRefresh }) {
   }
 
   const handleClearAll = async () => {
-    if (!window.confirm('Delete all stock data and allocation results? This cannot be undone.')) return
+    if (!(await dialog.confirm(
+      'Delete FG stock data (in-house + warehouse) and allocation results? WIP and other stock types are NOT affected.',
+      { title: 'Clear FG data', detail: 'This cannot be undone.' },
+    ))) return
     setClearing(true)
     try {
-      await deleteStock()            // stock is auto-classified now — clear all
+      // Scope the deletion to FG-only stock types. Calling deleteStock()
+      // with no argument wipes EVERY stock category (WIP, plant,
+      // warehouse, combined, other) — a data-loss bug because this
+      // button is visually inside the "FG Allocation" section and the
+      // WIP section already has its own separately-scoped Clear button.
+      await deleteStock('fg_inhouse')
+      await deleteStock('fg_warehouse')
       await deleteAllocations()
       setAllocResult(null)
       setUploadResults({})
+      setPage(1)
       onRefresh()
     } catch (err) {
       setError(err.response?.data?.detail || err.message)
@@ -504,6 +590,24 @@ function FGAllocation({ onRefresh }) {
       setClearing(false)
     }
   }
+
+  const total = allocResult?.total || 0
+  const statusRenderer = useCallback((p) => <AllocStatusBadge status={p.data.status} />, [])
+  const columnDefs = useMemo(() => [
+    {
+      headerName: 'S No', width: 70, sortable: false, filter: false, pinned: 'left',
+      valueGetter: (p) => (page - 1) * pageSize + (p.node?.rowIndex ?? 0) + 1,
+    },
+    { field: 'cust_part_no', headerName: 'Cust Part #', minWidth: 150, pinned: 'left' },
+    { field: 'maini_part_no', headerName: 'Maini Part #', minWidth: 150 },
+    { field: 'customer', headerName: 'Customer', minWidth: 170 },
+    { field: 'demand_qty', headerName: 'Demand Qty', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'fg_inhouse', headerName: 'In-House FG', minWidth: 130, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'fg_warehouse', headerName: 'Warehouse FG', minWidth: 130, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'total_fg', headerName: 'Total FG', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'allocated', headerName: 'Allocated', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
+    { headerName: 'Stock Status', minWidth: 130, sortable: false, filter: false, cellRenderer: statusRenderer },
+  ], [page, pageSize, statusRenderer])
 
   return (
     <div className="space-y-6">
@@ -583,7 +687,7 @@ function FGAllocation({ onRefresh }) {
         </div>
 
         {/* Allocation Summary */}
-        {allocResult && (
+        {allocResult?.summary && (
           <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
             <h3 className="text-sm font-semibold text-blue-900 mb-2">Allocation Summary</h3>
             <div className="grid grid-cols-4 gap-3 text-center">
@@ -595,53 +699,37 @@ function FGAllocation({ onRefresh }) {
           </div>
         )}
 
-        {/* Allocation Table */}
-        <div className="border border-gray-200 rounded-lg overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="bg-gray-50 border-b border-gray-200">
-                {['Cust Part #', 'Maini Part #', 'Customer', 'Demand Qty', 'In-House FG', 'Warehouse FG', 'Total FG', 'Allocated', 'Stock Status'].map((h) => (
-                  <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-4 py-3 whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {allocResult?.allocations?.length > 0 ? (
-                allocResult.allocations.map((row, i) => (
-                  <tr key={i} className="border-b border-gray-100">
-                    <td className="px-4 py-2 text-sm">{row.cust_part_no}</td>
-                    <td className="px-4 py-2 text-sm">{row.maini_part_no}</td>
-                    <td className="px-4 py-2 text-sm">{row.customer}</td>
-                    <td className="px-4 py-2 text-sm">{row.demand_qty}</td>
-                    <td className="px-4 py-2 text-sm">{row.fg_inhouse}</td>
-                    <td className="px-4 py-2 text-sm">{row.fg_warehouse}</td>
-                    <td className="px-4 py-2 text-sm">{row.total_fg}</td>
-                    <td className="px-4 py-2 text-sm font-medium">{row.allocated}</td>
-                    <td className="px-4 py-2">
-                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
-                        row.status === 'full' ? 'bg-green-100 text-green-700' :
-                        row.status === 'partial' ? 'bg-yellow-100 text-yellow-700' :
-                        'bg-red-100 text-red-700'
-                      }`}>
-                        <div className={`w-2 h-2 rounded-full ${
-                          row.status === 'full' ? 'bg-green-500' :
-                          row.status === 'partial' ? 'bg-yellow-500' : 'bg-red-500'
-                        }`} />
-                        {row.status === 'full' ? 'Full' : row.status === 'partial' ? 'Partial' : 'No Stock'}
-                      </span>
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={9} className="px-6 py-8 text-center text-sm text-gray-500">
-                    Upload SAP FG reports and run allocation to see results.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        {/* Allocation Table — AG Grid, server-side paginated: `allocResult.allocations`
+            only ever holds the CURRENT PAGE's rows (see `load` above), same
+            pattern as the Master Data page's grid. The grid is only mounted
+            once `loading` is false rather than passed `loading` as a
+            reactive prop — in this AG Grid version, toggling `loading` on an
+            already-mounted grid leaves its loading overlay stuck visible
+            even after rowData has updated; mounting fresh each time it's
+            true→false avoids that entirely. */}
+        <div className="bg-white border border-gray-200 rounded-lg" style={{ height: 440 }}>
+          {loading ? (
+            <div className="flex items-center justify-center h-full">
+              <Loader2 size={22} className="animate-spin text-blue-500" />
+            </div>
+          ) : (
+            <AgGridReact
+              theme={themeQuartz}
+              rowData={allocResult?.allocations || []}
+              columnDefs={columnDefs}
+              defaultColDef={gridDefaultColDef}
+              rowHeight={40}
+              headerHeight={38}
+              pagination={false}
+              enableCellTextSelection={true}
+              suppressRowClickSelection={true}
+              animateRows={true}
+              suppressMenuHide={true}
+              overlayNoRowsTemplate='<span style="padding:12px;color:#6b7280;font-size:13px;">Upload SAP FG reports and run allocation to see results.</span>'
+            />
+          )}
         </div>
+        <GridPager total={total} page={page} pageSize={pageSize} onPage={setPage} onPageSize={(n) => { setPageSize(n); setPage(1) }} />
 
         {/* Legend */}
         <div className="flex items-center gap-4 mt-4">
@@ -664,13 +752,35 @@ function FGAllocation({ onRefresh }) {
 }
 
 function WIPAllocation({ onRefresh }) {
+  const dialog = useDialog()
   const [uploading, setUploading] = useState(false)
   const [uploadResult, setUploadResult] = useState(null)
   const [allocating, setAllocating] = useState(false)
+  // Latest WIP allocation, fetched from the server on mount — same fix as
+  // FGAllocation: previously this only ever showed data from a "Run
+  // Allocation" click made THIS session, so navigating to the tab after a
+  // page refresh showed an empty table even though a result already existed.
   const [allocResult, setAllocResult] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [clearing, setClearing] = useState(false)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(25)
   const fileRef = useRef(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetchLatestAllocation('wip', (page - 1) * pageSize, pageSize)
+      setAllocResult(res.data?.id != null ? res.data : null)
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [page, pageSize])
+
+  useEffect(() => { load() }, [load])
 
   const handleUpload = async (e) => {
     const file = e.target.files?.[0]
@@ -692,8 +802,9 @@ function WIPAllocation({ onRefresh }) {
     setAllocating(true)
     setError('')
     try {
-      const res = await runAllocation('wip')
-      setAllocResult(res.data)
+      await runAllocation('wip')
+      setPage(1)
+      await load()
       onRefresh()
     } catch (err) {
       setError(err.response?.data?.detail || err.message)
@@ -703,13 +814,14 @@ function WIPAllocation({ onRefresh }) {
   }
 
   const handleClearWIP = async () => {
-    if (!window.confirm('Delete all WIP stock data and allocation results?')) return
+    if (!(await dialog.confirm('Delete all WIP stock data and allocation results?', { title: 'Clear WIP data' }))) return
     setClearing(true)
     try {
       await deleteStock('wip')       // WIP uploads are tagged 'wip'
       await deleteAllocations()
       setAllocResult(null)
       setUploadResult(null)
+      setPage(1)
       onRefresh()
     } catch (err) {
       setError(err.response?.data?.detail || err.message)
@@ -717,6 +829,23 @@ function WIPAllocation({ onRefresh }) {
       setClearing(false)
     }
   }
+
+  const total = allocResult?.total || 0
+  const statusRenderer = useCallback((p) => <AllocStatusBadge status={p.data.status} />, [])
+  const columnDefs = useMemo(() => [
+    {
+      headerName: 'S No', width: 70, sortable: false, filter: false, pinned: 'left',
+      valueGetter: (p) => (page - 1) * pageSize + (p.node?.rowIndex ?? 0) + 1,
+    },
+    { field: 'cust_part_no', headerName: 'Cust Part #', minWidth: 150, pinned: 'left' },
+    { field: 'maini_part_no', headerName: 'Maini Part #', minWidth: 150 },
+    { field: 'customer', headerName: 'Customer', minWidth: 170 },
+    { field: 'demand_qty', headerName: 'Demand Qty', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'wip_qty', headerName: 'WIP Qty', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'allocated', headerName: 'Allocated', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'gap', headerName: 'Gap', minWidth: 100, type: 'numericColumn', cellClass: 'text-red-600', valueFormatter: (p) => p.value > 0 ? fmtNum(p.value) : '—' },
+    { headerName: 'Status', minWidth: 120, sortable: false, filter: false, cellRenderer: statusRenderer },
+  ], [page, pageSize, statusRenderer])
 
   return (
     <div className="space-y-6">
@@ -762,7 +891,7 @@ function WIPAllocation({ onRefresh }) {
           </div>
         )}
 
-        {allocResult && (
+        {allocResult?.summary && (
           <div className="mb-4 p-4 bg-purple-50 border border-purple-200 rounded-lg">
             <h3 className="text-sm font-semibold text-purple-900 mb-2">WIP Allocation Summary</h3>
             <div className="grid grid-cols-4 gap-3 text-center">
@@ -774,47 +903,29 @@ function WIPAllocation({ onRefresh }) {
           </div>
         )}
 
-        <div className="border border-gray-200 rounded-lg overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="bg-gray-50 border-b border-gray-200">
-                {['Cust Part #', 'Maini Part #', 'Customer', 'Demand Qty', 'WIP Qty', 'Allocated', 'Gap', 'Status'].map((h) => (
-                  <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-4 py-3 whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {allocResult?.allocations?.length > 0 ? (
-                allocResult.allocations.map((row, i) => (
-                  <tr key={i} className="border-b border-gray-100">
-                    <td className="px-4 py-2 text-sm">{row.cust_part_no}</td>
-                    <td className="px-4 py-2 text-sm">{row.maini_part_no}</td>
-                    <td className="px-4 py-2 text-sm">{row.customer}</td>
-                    <td className="px-4 py-2 text-sm">{row.demand_qty}</td>
-                    <td className="px-4 py-2 text-sm">{row.wip_qty}</td>
-                    <td className="px-4 py-2 text-sm font-medium">{row.allocated}</td>
-                    <td className="px-4 py-2 text-sm text-red-600">{row.gap > 0 ? row.gap : '—'}</td>
-                    <td className="px-4 py-2">
-                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
-                        row.status === 'full' ? 'bg-green-100 text-green-700' :
-                        row.status === 'partial' ? 'bg-yellow-100 text-yellow-700' :
-                        'bg-red-100 text-red-700'
-                      }`}>
-                        {row.status === 'full' ? 'Full' : row.status === 'partial' ? 'Partial' : 'No Stock'}
-                      </span>
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={8} className="px-6 py-8 text-center text-sm text-gray-500">
-                    Upload WIP reports and run allocation to see results.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        <div className="bg-white border border-gray-200 rounded-lg" style={{ height: 440 }}>
+          {loading ? (
+            <div className="flex items-center justify-center h-full">
+              <Loader2 size={22} className="animate-spin text-blue-500" />
+            </div>
+          ) : (
+            <AgGridReact
+              theme={themeQuartz}
+              rowData={allocResult?.allocations || []}
+              columnDefs={columnDefs}
+              defaultColDef={gridDefaultColDef}
+              rowHeight={40}
+              headerHeight={38}
+              pagination={false}
+              enableCellTextSelection={true}
+              suppressRowClickSelection={true}
+              animateRows={true}
+              suppressMenuHide={true}
+              overlayNoRowsTemplate='<span style="padding:12px;color:#6b7280;font-size:13px;">Upload WIP reports and run allocation to see results.</span>'
+            />
+          )}
         </div>
+        <GridPager total={total} page={page} pageSize={pageSize} onPage={setPage} onPageSize={(n) => { setPageSize(n); setPage(1) }} />
       </div>
     </div>
   )
@@ -825,32 +936,64 @@ function LiquidationReports() {
   const [selectedAlloc, setSelectedAlloc] = useState(null)
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(25)
 
   useEffect(() => {
     loadAllocations()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const loadAllocations = async () => {
     try {
       const res = await fetchAllocations()
       setAllocations(res.data)
+      // Auto-select the most recent report so its detail is visible right
+      // away — previously this tab always started on "Select an allocation
+      // report to view details" even though a report already existed.
+      if (res.data?.length > 0) {
+        setSelectedAlloc((cur) => cur ?? res.data[0].id)
+      }
     } catch (err) {
       console.error('Failed to load allocations:', err)
     }
   }
 
-  const viewDetail = async (id) => {
+  // Any change to the selected report or the page size invalidates the
+  // current page — same pattern as Master Data's search/pageSize reset.
+  useEffect(() => { setPage(1) }, [selectedAlloc, pageSize])
+
+  const loadDetail = useCallback(async () => {
+    if (selectedAlloc == null) { setDetail(null); return }
     setLoading(true)
     try {
-      const res = await fetchAllocationDetail(id)
+      const res = await fetchAllocationDetail(selectedAlloc, (page - 1) * pageSize, pageSize)
       setDetail(res.data)
-      setSelectedAlloc(id)
     } catch (err) {
       console.error('Failed to load allocation detail:', err)
     } finally {
       setLoading(false)
     }
-  }
+  }, [selectedAlloc, page, pageSize])
+
+  useEffect(() => { loadDetail() }, [loadDetail])
+
+  const total = detail?.total || 0
+  const statusRenderer = useCallback((p) => <AllocStatusBadge status={p.data.status} />, [])
+  const columnDefs = useMemo(() => [
+    {
+      headerName: 'S No', width: 70, sortable: false, filter: false, pinned: 'left',
+      valueGetter: (p) => (page - 1) * pageSize + (p.node?.rowIndex ?? 0) + 1,
+    },
+    { headerName: 'Part #', minWidth: 150, pinned: 'left', valueGetter: (p) => p.data?.cust_part_no || p.data?.maini_part_no },
+    { field: 'customer', headerName: 'Customer', minWidth: 170 },
+    { field: 'demand_qty', headerName: 'Demand Qty', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'total_fg', headerName: 'FG Allocated', minWidth: 130, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value || 0) },
+    { field: 'wip_qty', headerName: 'WIP Allocated', minWidth: 130, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value || 0) },
+    { field: 'allocated', headerName: 'Total Allocated', minWidth: 140, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'gap', headerName: 'Unallocated', minWidth: 120, type: 'numericColumn', cellClass: 'text-red-600', valueFormatter: (p) => p.value > 0 ? fmtNum(p.value) : '—' },
+    { headerName: 'Status', minWidth: 120, sortable: false, filter: false, cellRenderer: statusRenderer },
+  ], [page, pageSize, statusRenderer])
 
   return (
     <div className="space-y-6">
@@ -868,7 +1011,7 @@ function LiquidationReports() {
             {allocations.map((a) => (
               <button
                 key={a.id}
-                onClick={() => viewDetail(a.id)}
+                onClick={() => setSelectedAlloc(a.id)}
                 className={`border rounded-lg p-3 text-left transition-colors ${
                   selectedAlloc === a.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300'
                 }`}
@@ -889,54 +1032,34 @@ function LiquidationReports() {
           </div>
         )}
 
-        {/* Detail Table */}
-        <div className="border border-gray-200 rounded-lg overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="bg-gray-50 border-b border-gray-200">
-                {['Part #', 'Customer', 'Demand Qty', 'FG Allocated', 'WIP Allocated', 'Total Allocated', 'Unallocated', 'Status'].map((h) => (
-                  <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-4 py-3 whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td colSpan={8} className="px-6 py-8 text-center">
-                    <Loader2 size={20} className="mx-auto text-blue-500 animate-spin" />
-                  </td>
-                </tr>
-              ) : detail?.allocations?.length > 0 ? (
-                detail.allocations.map((row, i) => (
-                  <tr key={i} className="border-b border-gray-100">
-                    <td className="px-4 py-2 text-sm">{row.cust_part_no || row.maini_part_no}</td>
-                    <td className="px-4 py-2 text-sm">{row.customer}</td>
-                    <td className="px-4 py-2 text-sm">{row.demand_qty}</td>
-                    <td className="px-4 py-2 text-sm">{row.total_fg || 0}</td>
-                    <td className="px-4 py-2 text-sm">{row.wip_qty || 0}</td>
-                    <td className="px-4 py-2 text-sm font-medium">{row.allocated}</td>
-                    <td className="px-4 py-2 text-sm text-red-600">{row.gap > 0 ? row.gap : '—'}</td>
-                    <td className="px-4 py-2">
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                        row.status === 'full' ? 'bg-green-100 text-green-700' :
-                        row.status === 'partial' ? 'bg-yellow-100 text-yellow-700' :
-                        'bg-red-100 text-red-700'
-                      }`}>
-                        {row.status === 'full' ? 'Full' : row.status === 'partial' ? 'Partial' : 'No Stock'}
-                      </span>
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={8} className="px-6 py-8 text-center text-sm text-gray-500">
-                    {allocations.length > 0 ? 'Select an allocation report to view details.' : 'Run FG and WIP allocations first to generate liquidation reports.'}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        {/* Detail Table — AG Grid, server-side paginated per selected report.
+            Mounted only once `loading` is false (see FGAllocation's comment
+            on why `loading` isn't passed as a reactive prop here). */}
+        <div className="bg-white border border-gray-200 rounded-lg" style={{ height: 440 }}>
+          {loading ? (
+            <div className="flex items-center justify-center h-full">
+              <Loader2 size={22} className="animate-spin text-blue-500" />
+            </div>
+          ) : (
+            <AgGridReact
+              theme={themeQuartz}
+              rowData={detail?.allocations || []}
+              columnDefs={columnDefs}
+              defaultColDef={gridDefaultColDef}
+              rowHeight={40}
+              headerHeight={38}
+              pagination={false}
+              enableCellTextSelection={true}
+              suppressRowClickSelection={true}
+              animateRows={true}
+              suppressMenuHide={true}
+              overlayNoRowsTemplate={`<span style="padding:12px;color:#6b7280;font-size:13px;">${
+                allocations.length > 0 ? 'Select an allocation report to view details.' : 'Run FG and WIP allocations first to generate liquidation reports.'
+              }</span>`}
+            />
+          )}
         </div>
+        <GridPager total={total} page={page} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
       </div>
     </div>
   )

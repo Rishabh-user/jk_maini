@@ -7,6 +7,8 @@ import {
   Download, Columns, FileText,
 } from 'lucide-react'
 import { fetchZSOReports, exportZSO, generateZSO, fetchEmails, fetchReportVersions, fetchVersionChanges } from '../services/api'
+import { useDialog } from '../components/DialogProvider'
+import { useToast } from '../components/ToastProvider'
 
 ModuleRegistry.registerModules([AllCommunityModule])
 
@@ -299,6 +301,8 @@ function VersionHistory({ reportId }) {
 // ─── Main component ────────────────────────────────────────────────────────
 
 export default function ZSOReports() {
+  const dialog = useDialog()
+  const toast = useToast()
   const gridRef = useRef(null)
   const colPanelRef = useRef(null)
   const exportPanelRef = useRef(null)
@@ -316,6 +320,13 @@ export default function ZSOReports() {
   const [loadingEmails, setLoadingEmails] = useState(false)
   const [selectedEmailId, setSelectedEmailId] = useState(null)
   const [generating, setGenerating] = useState(false)
+  // The report id returned by the most recent successful generate/regenerate
+  // in THIS session — used to show a "New" badge in the sidebar so it's
+  // obvious which report just got created (especially important when
+  // regenerating an email that already had a report — the new one lands
+  // as a separate entry, and without this badge it's easy to miss which
+  // one is the fresh version).
+  const [justGeneratedReportId, setJustGeneratedReportId] = useState(null)
 
   const [forecastPreview, setForecastPreview] = useState(null)
   const [showColPanel, setShowColPanel] = useState(false)
@@ -361,6 +372,16 @@ export default function ZSOReports() {
     lineItems: reports.reduce((s, r) => s + getItems(r).length, 0),
     totalInr: reports.reduce((s, r) => s + getReportTotal(r), 0),
   }), [reports])
+
+  // Email ids that already have at least one report — used in the Generate
+  // modal's picker to flag "this will create a new version" instead of
+  // leaving the user unsure whether they're generating for the first time
+  // or regenerating (regeneration was always technically supported by the
+  // backend's version-chain logic; the picker just never surfaced it).
+  const emailIdsWithReports = useMemo(
+    () => new Set(reports.map(r => r.email_id).filter(Boolean)),
+    [reports],
+  )
 
   const filteredReports = useMemo(() => {
     const q = reportSearch.trim().toLowerCase()
@@ -504,7 +525,7 @@ export default function ZSOReports() {
 
   const handleExportExcel = useCallback(async () => {
     if (selectedReportId === 'all') {
-      alert('Please select a single report from the sidebar to export as Excel.')
+      await dialog.alert('Please select a single report from the sidebar to export as Excel.')
       return
     }
     setExporting(true)
@@ -523,9 +544,9 @@ export default function ZSOReports() {
       a.click()
       URL.revokeObjectURL(url)
       await loadReports()
-    } catch (err) { alert('Export failed: ' + (err.response?.data?.detail || err.message)) }
+    } catch (err) { await dialog.alert('Export failed', { tone: 'danger', detail: err.response?.data?.detail || err.message }) }
     finally { setExporting(false) }
-  }, [selectedReportId, reports, emailIndex, loadReports])
+  }, [selectedReportId, reports, emailIndex, loadReports, dialog])
 
   const handleExportCSV = useCallback(() => {
     if (!gridRef.current) return
@@ -560,12 +581,29 @@ export default function ZSOReports() {
 
   const handleGenerate = async () => {
     if (!selectedEmailId) return
+    const isRegenerate = emailIdsWithReports.has(selectedEmailId)
     setGenerating(true)
     try {
-      await generateZSO(selectedEmailId)
+      const res = await generateZSO(selectedEmailId)
+      const report = res.data
       setShowGenerate(false)
       await loadReports()
-    } catch (err) { alert('Generation failed: ' + (err.response?.data?.detail || err.message)) }
+      // Backend versioning (see app/api/zso.py::generate_zso) returns the
+      // EXISTING report unchanged when regenerating produces no diff — in
+      // that case don't badge/toast it as "new", since nothing actually
+      // changed. Compare against the reports we just reloaded: a report
+      // whose id wasn't in our pre-generate set is genuinely new.
+      const wasAlreadyKnown = reports.some(r => r.id === report.id)
+      if (report?.id) {
+        setSelectedReportId(report.id)
+        if (!wasAlreadyKnown) {
+          setJustGeneratedReportId(report.id)
+          toast.success(isRegenerate ? 'New version generated' : 'Report generated')
+        } else {
+          toast.info('No changes since the last version — showing the existing report')
+        }
+      }
+    } catch (err) { await dialog.alert('Generation failed', { tone: 'danger', detail: err.response?.data?.detail || err.message }) }
     finally { setGenerating(false) }
   }
 
@@ -642,7 +680,14 @@ export default function ZSOReports() {
                   <div className="flex items-start gap-3 min-w-0">
                     <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-emerald-50 text-emerald-600"><FileSpreadsheet size={17} /></span>
                     <span className="min-w-0 flex-1">
-                      <span className={`block truncate text-sm font-medium ${selected ? 'text-blue-900' : 'text-gray-900'}`}>{fileLabel}</span>
+                      <span className="flex items-center gap-1.5">
+                        <span className={`block truncate text-sm font-medium ${selected ? 'text-blue-900' : 'text-gray-900'}`}>{fileLabel}</span>
+                        {report.id === justGeneratedReportId && (
+                          <span className="shrink-0 inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-semibold px-1.5 py-0.5">
+                            New
+                          </span>
+                        )}
+                      </span>
                       <span className="mt-1 block truncate text-xs text-gray-500">Report #{report.id} · {report.kas_name || 'Unassigned KAS'}</span>
                       {fileMeta && fileMeta !== fileLabel && <span className="mt-1 block truncate text-xs text-gray-400">{fileMeta}</span>}
                       <span className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-500">
@@ -827,10 +872,32 @@ export default function ZSOReports() {
                   >
                     <div className="flex items-center justify-between">
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-gray-900 truncate">{email.subject || '(No subject)'}</p>
+                        <p className="text-sm font-medium text-gray-900 truncate flex items-center gap-1.5">
+                          <span className="truncate">{email.subject || '(No subject)'}</span>
+                          {emailIdsWithReports.has(email.id) && (
+                            <span
+                              className="shrink-0 inline-flex items-center rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold px-1.5 py-0.5"
+                              title="This email already has a report — generating again creates a new version"
+                            >
+                              Regenerate
+                            </span>
+                          )}
+                        </p>
                         <p className="text-xs text-gray-500 mt-0.5 truncate">{email.sender}</p>
                       </div>
-                      <span className="ml-3 text-xs text-gray-400 shrink-0">{email.attachments?.length || 0} file{(email.attachments?.length || 0) !== 1 ? 's' : ''}</span>
+                      <span className="ml-3 text-xs text-gray-400 shrink-0">
+                        {(() => {
+                          // Exclude the synthetic "email_body.html"/"email_body.txt"
+                          // row the backend always adds per email (see
+                          // email_processor.py::_ensure_body_attachment) — it's
+                          // not a file the sender attached, so counting it here
+                          // made a 7-attachment email read as "8 files".
+                          const real = (email.attachments || []).filter(
+                            (a) => a?.filename !== 'email_body.html' && a?.filename !== 'email_body.txt'
+                          )
+                          return `${real.length} file${real.length !== 1 ? 's' : ''}`
+                        })()}
+                      </span>
                     </div>
                     <p className="text-xs text-gray-400 mt-1">{formatDateTime(email.received_at || email.created_at)}</p>
                   </button>
@@ -845,7 +912,11 @@ export default function ZSOReports() {
                 className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
               >
                 {generating && <Loader2 size={14} className="animate-spin" />}
-                {generating ? 'Generating...' : 'Generate Report'}
+                {generating
+                  ? 'Generating...'
+                  : selectedEmailId && emailIdsWithReports.has(selectedEmailId)
+                  ? 'Regenerate Report'
+                  : 'Generate Report'}
               </button>
             </div>
           </div>

@@ -1,107 +1,144 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Mail, Lock, LogIn } from 'lucide-react'
+import { Eye, EyeOff, Loader2, Lock, LogIn, Mail, Sparkles } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { useToast } from '../components/ToastProvider'
+import { formatError } from '../utils/formatError'
 
 export default function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [role, setRole] = useState('admin')
+  const [showPwd, setShowPwd] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const { login } = useAuth()
   const navigate = useNavigate()
+  const toast = useToast()
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
     setLoading(true)
     try {
-      await login(email, password, role)
+      await login(email, password)
+      toast.success('Signed in', { message: `Welcome back, ${email}` })
       navigate('/dashboard')
     } catch (err) {
-      setError(err.response?.data?.detail || 'Login failed. Check credentials.')
+      setError(formatError(err, 'Login failed. Check credentials.'))
     } finally {
       setLoading(false)
     }
   }
 
   return (
-    <div className="min-h-screen bg-[#fdf6f0] flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
+    <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-slate-50 via-blue-50/40 to-amber-50/30 flex items-center justify-center p-4">
+      {/* Soft blurred accent shapes — pure decoration, no runtime cost. */}
+      <div aria-hidden className="pointer-events-none absolute -top-32 -left-24 w-96 h-96 bg-blue-200/30 rounded-full blur-3xl" />
+      <div aria-hidden className="pointer-events-none absolute -bottom-40 -right-24 w-[28rem] h-[28rem] bg-amber-200/30 rounded-full blur-3xl" />
+
+      <div className="relative w-full max-w-md">
+        {/* Brand block sits outside the card so it feels like the app,
+            not a form-inside-a-form. */}
+        <div className="text-center mb-6">
+          <div className="mx-auto mb-3 w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-blue-500 flex items-center justify-center shadow-md ring-1 ring-blue-500/40">
+            <span className="text-white font-bold text-xl">JK</span>
+          </div>
+          <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">
+            JK Maini
+          </h1>
+          <p className="mt-1 text-sm text-gray-500 flex items-center justify-center gap-1.5">
+            <Sparkles size={12} className="text-amber-500" />
+            AI-powered Email to ZSO Automation
+          </p>
+        </div>
+
         <form
           onSubmit={handleSubmit}
-          className="bg-white rounded-2xl shadow-lg p-8 space-y-5"
+          className="bg-white/95 backdrop-blur rounded-2xl shadow-xl ring-1 ring-gray-200/60 p-7 space-y-4"
         >
-          {/* Brand */}
-          <div className="text-center">
-            <div className="w-14 h-14 rounded-xl bg-blue-600 flex items-center justify-center text-white font-bold text-xl mx-auto mb-3">
-              JK
-            </div>
-            <h1 className="text-2xl font-bold text-gray-900">JK Maini</h1>
-            <p className="text-sm text-gray-500 mt-1">AI Email to ZSO Automation</p>
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Sign in</h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Enter your credentials to continue.
+            </p>
           </div>
 
           {error && (
-            <div className="bg-red-50 text-red-600 text-sm px-4 py-2 rounded-lg border border-red-200">
+            <div role="alert" className="bg-rose-50 text-rose-700 text-sm px-3 py-2 rounded-lg border border-rose-200">
               {error}
             </div>
           )}
 
           {/* Email */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1" htmlFor="login-email">
+              Email
+            </label>
             <div className="relative">
               <Mail size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
+                id="login-email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@maini.com"
+                placeholder="you@example.com"
+                autoComplete="email"
                 required
-                className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="w-full pl-10 pr-3 py-2.5 border border-gray-200 rounded-lg text-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:border-blue-500 transition"
               />
             </div>
           </div>
 
           {/* Password */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1" htmlFor="login-password">
+              Password
+            </label>
             <div className="relative">
               <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
-                type="password"
+                id="login-password"
+                type={showPwd ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
+                autoComplete="current-password"
                 required
-                className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="w-full pl-10 pr-10 py-2.5 border border-gray-200 rounded-lg text-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:border-blue-500 transition"
               />
+              <button
+                type="button"
+                onClick={() => setShowPwd((v) => !v)}
+                aria-label={showPwd ? 'Hide password' : 'Show password'}
+                tabIndex={-1}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100"
+              >
+                {showPwd ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
             </div>
-          </div>
-
-          {/* Role selector */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Login as</label>
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              className="w-full px-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-            >
-              <option value="admin">Admin</option>
-              <option value="kas">KAS</option>
-              <option value="viewer">Viewer</option>
-            </select>
           </div>
 
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+            className="w-full bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 disabled:from-blue-400 disabled:to-blue-400 text-white text-sm font-medium py-2.5 rounded-lg flex items-center justify-center gap-2 shadow-sm transition disabled:cursor-not-allowed"
           >
-            <LogIn size={18} />
-            {loading ? 'Signing in...' : 'Sign In'}
+            {loading ? (
+              <>
+                <Loader2 size={16} className="animate-spin" />
+                Signing in…
+              </>
+            ) : (
+              <>
+                <LogIn size={16} />
+                Sign In
+              </>
+            )}
           </button>
+
+          <p className="text-[11px] text-center text-gray-400 pt-1">
+            Contact your administrator if you can’t sign in.
+          </p>
         </form>
       </div>
     </div>

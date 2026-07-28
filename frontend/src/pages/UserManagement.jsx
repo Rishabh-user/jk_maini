@@ -2,8 +2,11 @@ import { useState, useEffect, useCallback } from 'react'
 import { Search, Plus, Pencil, X } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
 import { fetchUsers, createUser, updateUser } from '../services/api'
+import { useDialog } from '../components/DialogProvider'
+import { formatError } from '../utils/formatError'
 
 export default function UserManagement() {
+  const dialog = useDialog()
   const [users, setUsers] = useState([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
@@ -63,7 +66,7 @@ export default function UserManagement() {
       setShowModal(false)
       await load()
     } catch (err) {
-      alert('Save failed: ' + (err.response?.data?.detail || err.message))
+      await dialog.alert('Save failed', { tone: 'danger', detail: formatError(err) })
     } finally {
       setSaving(false)
     }

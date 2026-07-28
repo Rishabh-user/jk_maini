@@ -27,6 +27,7 @@ class MainiPartCreate(BaseModel):
     currency: str = "INR"
     incoterm: str | None = None
     hsn_code: str | None = None
+    extra_data: dict | None = None
 
 
 class MainiPartResponse(BaseModel):
@@ -43,9 +44,21 @@ class MainiPartResponse(BaseModel):
     currency: str | None
     incoterm: str | None = None
     hsn_code: str | None
+    # Columns from an uploaded file that didn't map to a known field —
+    # {original_header: value}. None when the row has nothing extra.
+    extra_data: dict | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class MasterDataListResponse(BaseModel):
+    total: int
+    items: list[MainiPartResponse]
+    # Union of extra_data keys seen across the WHOLE table (not just this
+    # page) — lets the frontend build stable AG Grid columns for "extra"
+    # fields that don't shift every time you turn the page.
+    extra_columns: list[str] = []
 
 
 class ZSOGenerateRequest(BaseModel):
