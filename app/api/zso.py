@@ -71,22 +71,24 @@ async def generate_zso(
     # Match with maini_parts
     matched_rows = await match_with_maini_parts(db, all_mapped_rows)
 
-    # Fetch current forex rates (most recent per currency)
+    # Fetch the ACTIVE forex rate per currency — explicit is_active flag,
+    # not "most recent effective_date wins". The old date-recency logic
+    # had no tie-breaker for two rows sharing the same effective_date, so
+    # which rate got used could silently flip between generations. Users
+    # now control which rate is active directly (Master Data > Forex
+    # Rates), so this reads exactly what they set.
     forex_result = await db.execute(
-        select(ForexRate).order_by(ForexRate.currency_from, ForexRate.effective_date.desc())
+        select(ForexRate).where(ForexRate.is_active.is_(True))
     )
     all_forex = forex_result.scalars().all()
     forex_rates: dict[str, dict] = {}
-    seen_currencies: set[str] = set()
     for fx in all_forex:
-        if fx.currency_from not in seen_currencies:
-            seen_currencies.add(fx.currency_from)
-            forex_rates[fx.currency_from] = {
-                "rate": fx.rate,
-                "currency_to": fx.currency_to,
-                "effective_date": fx.effective_date.isoformat(),
-                "notes": fx.notes,
-            }
+        forex_rates[fx.currency_from] = {
+            "rate": fx.rate,
+            "currency_to": fx.currency_to,
+            "effective_date": fx.effective_date.isoformat(),
+            "notes": fx.notes,
+        }
     # INR→INR is always 1
     forex_rates.setdefault("INR", {"rate": 1.0, "currency_to": "INR", "effective_date": "", "notes": "Base currency"})
 
@@ -171,9 +173,37 @@ async def generate_zso(
             )).scalar_one_or_none()
             old_items = (snap.report_data or {}).get("items", []) if snap else []
             diff = vs.diff_items(old_items, items)
-            if not diff["has_changes"] and snap is not None:
+
+            # A forex-rate switch (Master Data > Forex Rates > Activate) changes
+            # every row's unit_price_inr/total_inr but touches none of
+            # diff_items' TRACKED_FIELDS — those are demand/PO fields, not
+            # currency conversion. Check separately so regenerating after
+            # switching the active rate doesn't silently return the stale
+            # pre-switch report just because the underlying PO data matches.
+            old_forex_used = (snap.report_data or {}).get("forex_rates_used", {}) if snap else {}
+            new_forex_used = zso_data.get("forex_rates_used", {})
+            forex_changes = vs.forex_rate_diff(old_forex_used, new_forex_used)
+
+            if not diff["has_changes"] and not forex_changes and snap is not None:
                 logger.info(f"ZSO generate: no changes vs v{latest.version_number} — duplicate, no new version")
                 return snap  # return the existing current version; nothing new saved
+
+            if forex_changes:
+                # Surface the forex switch as a visible change (reuses the
+                # existing ReportChange mechanism) instead of creating a new
+                # version whose demand-level diff misleadingly shows "0
+                # changed" despite every row's INR total being different now.
+                diff = dict(diff)
+                diff["modified"] = list(diff["modified"]) + [{
+                    "row_key": "__forex_rate_change__",
+                    "cust_part_no": "",
+                    "po_number": "",
+                    "changes": forex_changes,
+                }]
+                diff["has_changes"] = True
+                diff["counts"] = {**diff["counts"], "modified": diff["counts"]["modified"] + 1}
+                logger.info(f"ZSO generate: forex rate change detected vs v{latest.version_number}: {forex_changes}")
+
             report = await save_zso_report(db, email.id, current_user, zso_data)
             await vs.record_version(
                 db, demand_doc_key=latest.demand_doc_key,

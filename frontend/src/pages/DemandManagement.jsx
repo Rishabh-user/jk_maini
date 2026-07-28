@@ -12,6 +12,7 @@ import {
   fetchCorrections, fetchCorrectionStats, createCorrection, reviewCorrection, deleteCorrection,
   fetchComparableReports, fetchFollowups, createFollowup, updateFollowup, deleteFollowup
 } from '../services/api'
+import { useDialog } from '../components/DialogProvider'
 
 const TABS = [
   { id: 'aggregation',        label: 'Data Aggregation' },
@@ -203,6 +204,7 @@ function AggregationTab({ stats, onRefresh }) {
 //          two demand cycles — new parts, removed parts, qty increases/decreases.
 // ─────────────────────────────────────────────────────────────────────────────
 function ComparisonTab() {
+  const dialog = useDialog()
   const [reports, setReports] = useState([])
   const [currentId, setCurrentId] = useState('')
   const [previousId, setPreviousId] = useState('')
@@ -257,7 +259,11 @@ function ComparisonTab() {
 
   // ── Follow-up actions ──
   const logFollowup = async (item) => {
-    const note = window.prompt(`Log follow-up for ${item.part}\n(e.g. "Confirmed +500 with customer on call"):`, '')
+    const note = await dialog.prompt(`Log follow-up for ${item.part}`, {
+      title: 'Add follow-up note',
+      placeholder: 'e.g. "Confirmed +500 with customer on call"',
+      defaultValue: '',
+    })
     if (note === null) return
     try {
       await createFollowup({
@@ -269,16 +275,16 @@ function ComparisonTab() {
         note,
       })
       await loadFollowups(currentId, previousId)
-    } catch (err) { alert('Failed: ' + (err.response?.data?.detail || err.message)) }
+    } catch (err) { await dialog.alert('Failed', { tone: 'danger', detail: err.response?.data?.detail || err.message }) }
   }
   const toggleFollowup = async (f) => {
     try { await updateFollowup(f.id, { status: f.status === 'done' ? 'open' : 'done' }); await loadFollowups(currentId, previousId) }
-    catch (err) { alert('Failed: ' + (err.response?.data?.detail || err.message)) }
+    catch (err) { await dialog.alert('Failed', { tone: 'danger', detail: err.response?.data?.detail || err.message }) }
   }
   const removeFollowup = async (f) => {
-    if (!confirm('Delete this follow-up?')) return
+    if (!(await dialog.confirm('Delete this follow-up?'))) return
     try { await deleteFollowup(f.id); await loadFollowups(currentId, previousId) }
-    catch (err) { alert('Failed: ' + (err.response?.data?.detail || err.message)) }
+    catch (err) { await dialog.alert('Failed', { tone: 'danger', detail: err.response?.data?.detail || err.message }) }
   }
   const followupRowIds = new Set(followups.map(f => f.row_id).filter(Boolean))
 
@@ -788,6 +794,7 @@ function ComparisonTable({ title, columns, rows, renderRow, empty }) {
 //          commitment defined in contracts.
 // ─────────────────────────────────────────────────────────────────────────────
 function VMITab() {
+  const dialog = useDialog()
   const [vmiUploads, setVmiUploads] = useState([])
   const [ssUploads, setSsUploads] = useState([])
   const [uploading, setUploading] = useState(null)
@@ -812,20 +819,20 @@ function VMITab() {
       await uploadDemandFile(file, type)
       load()
     } catch (err) {
-      alert('Upload failed: ' + (err.response?.data?.detail || err.message))
+      await dialog.alert('Upload failed', { tone: 'danger', detail: err.response?.data?.detail || err.message })
     } finally { setUploading(null) }
   }
 
   const handleDelete = async (id) => {
-    if (!window.confirm('Delete this upload?')) return
+    if (!(await dialog.confirm('Delete this upload?'))) return
     try { await deleteDemandUpload(id); load() }
-    catch (err) { alert('Delete failed') }
+    catch (err) { await dialog.alert('Delete failed', { tone: 'danger' }) }
   }
 
   const handlePreview = async (id) => {
     if (previewData?.id === id) { setPreviewData(null); return }
     try { const res = await previewDemandUpload(id); setPreviewData(res.data) }
-    catch (err) { alert('Preview failed') }
+    catch (err) { await dialog.alert('Preview failed', { tone: 'danger' }) }
   }
 
   return (
@@ -941,6 +948,7 @@ const FIELD_LABELS = {
 }
 
 function MasterCorrectionTab() {
+  const dialog = useDialog()
   const [corrections, setCorrections] = useState([])
   const [corrStats, setCorrStats] = useState({ pending: 0, approved: 0, rejected: 0 })
   const [loading, setLoading] = useState(true)
@@ -970,14 +978,15 @@ function MasterCorrectionTab() {
 
   const handleSubmit = async () => {
     if (!form.customer_part_no.trim() || !form.new_value.trim()) {
-      alert('Customer Part # and New Value are required.'); return
+      await dialog.alert('Customer Part # and New Value are required.')
+      return
     }
     setSubmitting(true)
     try {
       await createCorrection(form)
       setForm(emptyForm); setShowForm(false); load()
     } catch (err) {
-      alert('Submit failed: ' + (err.response?.data?.detail || err.message))
+      await dialog.alert('Submit failed', { tone: 'danger', detail: err.response?.data?.detail || err.message })
     } finally { setSubmitting(false) }
   }
 
@@ -987,14 +996,14 @@ function MasterCorrectionTab() {
       await reviewCorrection(id, { status: action, review_notes: reviewNotes || null })
       setReviewModal(null); setReviewNotes(''); load()
     } catch (err) {
-      alert('Review failed: ' + (err.response?.data?.detail || err.message))
+      await dialog.alert('Review failed', { tone: 'danger', detail: err.response?.data?.detail || err.message })
     } finally { setSubmitting(false) }
   }
 
   const handleDelete = async (id) => {
-    if (!window.confirm('Delete this correction request?')) return
+    if (!(await dialog.confirm('Delete this correction request?'))) return
     try { await deleteCorrection(id); load() }
-    catch (err) { alert('Delete failed') }
+    catch (err) { await dialog.alert('Delete failed', { tone: 'danger' }) }
   }
 
   const STATUS_BADGE = {

@@ -38,6 +38,12 @@ class MainiPart(Base):
     currency: Mapped[str | None] = mapped_column(String(10), default="INR")
     incoterm: Mapped[str | None] = mapped_column(String(50))
     hsn_code: Mapped[str | None] = mapped_column(String(50))
+    # Any column from an uploaded Excel/CSV that didn't map to one of the
+    # fixed fields above (via the AI/alias mapper) lands here instead of
+    # being silently dropped — {original_header: cell_value}. Keeps every
+    # column from the source file, even ones this schema has no dedicated
+    # field for.
+    extra_data: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -54,7 +60,11 @@ class ReportVersion(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     demand_doc_key: Mapped[str] = mapped_column(String(128), index=True)   # stable chain id (assigned at V1)
     version_number: Mapped[int] = mapped_column(Integer, default=1)
-    zso_report_id: Mapped[int] = mapped_column(Integer, ForeignKey("zso_reports.id"), index=True)  # full snapshot
+    # CASCADE: a version IS its ZSOReport snapshot — a version-history entry
+    # pointing at a deleted (gone) snapshot has no meaning, so it goes too.
+    zso_report_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("zso_reports.id", ondelete="CASCADE"), index=True
+    )  # full snapshot
     is_base: Mapped[bool] = mapped_column(Boolean, default=False)
     source: Mapped[str | None] = mapped_column(String(20))                 # manual | email
     source_email_id: Mapped[int | None] = mapped_column(Integer)
@@ -74,7 +84,11 @@ class ReportChange(Base):
     __tablename__ = "report_changes"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    version_id: Mapped[int] = mapped_column(Integer, ForeignKey("report_versions.id"), index=True)
+    # CASCADE: a change-log row is a child record of its version — no
+    # meaning once the version it describes is gone.
+    version_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("report_versions.id", ondelete="CASCADE"), index=True
+    )
     row_key: Mapped[str | None] = mapped_column(String(255), index=True)   # row_id / line identity
     cust_part_no: Mapped[str | None] = mapped_column(String(255))
     po_number: Mapped[str | None] = mapped_column(String(120))
@@ -197,9 +211,19 @@ class ForecastEntry(Base):
 class ForexRate(Base):
     """Manually entered exchange rates used for INR conversion in ZSO reports.
 
-    Finance team enters rates periodically (e.g., monthly).
-    The most recent rate for a given currency is used when generating ZSO reports.
-    The rate and its entry date are stamped on every ZSO report for transparency.
+    Finance team enters rates periodically (e.g., monthly). Exactly ONE row
+    per currency_from is the active one at any time (enforced in
+    app/api/forex.py, not at the DB constraint level — SQLite/Postgres
+    partial-unique-index support varies and the app-level check is simple
+    enough). That row's rate is what ZSO report generation uses; the rate
+    and its entry date are stamped on every ZSO report for transparency.
+
+    is_active replaces an earlier "most recent effective_date wins"
+    scheme — that broke down when two rows shared the same effective_date
+    (their relative order was whatever Postgres felt like on a given
+    query, since there was no secondary sort key), so which rate a report
+    used could silently flip between generations. is_active is an
+    explicit, user-controlled flag instead.
     """
     __tablename__ = "forex_rates"
 
@@ -210,6 +234,7 @@ class ForexRate(Base):
     effective_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     entered_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), index=True)
     notes: Mapped[str | None] = mapped_column(String(500))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -242,7 +267,12 @@ class AllocationResult(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     created_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), index=True)
-    zso_report_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("zso_reports.id"), nullable=True)
+    # SET NULL: an allocation result is an independent downstream artifact
+    # that only references a report for context — deleting the report
+    # shouldn't destroy allocation history, just sever the now-dangling link.
+    zso_report_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("zso_reports.id", ondelete="SET NULL"), nullable=True
+    )
     allocation_type: Mapped[str] = mapped_column(String(50))  # fg, wip, combined
     result_data: Mapped[dict | None] = mapped_column(JSON)  # list of allocation rows
     summary: Mapped[dict | None] = mapped_column(JSON)

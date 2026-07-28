@@ -65,8 +65,11 @@ export const fetchAttachmentRawData = (id) =>
   api.get(`/attachments/${id}/raw-data`)
 
 // ─── Master Data ─────────────────────────────
-export const fetchMasterData = (search) => {
-  const params = {}
+// Server-side paginated — only `limit` rows come back per call, plus the
+// table-wide total and the union of extra_data keys (for AG Grid's
+// dynamically-added "extra" columns). skip/limit drive the AG Grid page.
+export const fetchMasterData = (search, skip = 0, limit = 25) => {
+  const params = { skip, limit }
   if (search) params.search = search
   return api.get('/master-data/', { params })
 }
@@ -88,12 +91,38 @@ export const fetchZSOReports = () => api.get('/zso/')
 export const fetchZSOById = (id) => api.get(`/zso/${id}`)
 export const fetchReportVersions = (reportId) => api.get(`/zso/${reportId}/versions`)
 export const fetchVersionChanges = (versionId) => api.get(`/zso/versions/${versionId}/changes`)
-export const exportZSO = (id, visibleColumns = null) =>
-  api.post(
+// Blob responses need extra care: a JSON error body (e.g. FastAPI 500 with
+// { detail: "..." }) still comes back as a Blob when responseType='blob',
+// and axios only rejects the promise for HTTP statuses in `validateStatus`.
+// If a downstream caller trusts a "successful" blob and forces a download,
+// the user gets a "successful" .xlsx that's actually an HTML error page.
+// We add validateStatus to force a real rejection on non-2xx, AND we
+// sniff the blob's content-type before returning — if it's JSON the caller
+// can surface the parsed error instead of writing junk to disk.
+export const exportZSO = async (id, visibleColumns = null) => {
+  const res = await api.post(
     `/zso/export/${id}`,
-    visibleColumns ? visibleColumns : null,   // send column list as JSON body when provided
-    { responseType: 'blob' }
+    visibleColumns ? visibleColumns : null,
+    {
+      responseType: 'blob',
+      // axios's default validateStatus rejects >=400 already, but blob
+      // responses can also come back as a Blob wrapping a JSON error even
+      // when the status is 200 (some proxies do this). Belt-and-braces
+      // check: if the content-type says JSON, parse it and throw.
+      validateStatus: (s) => s >= 200 && s < 300,
+    },
   )
+  const ct = (res.headers?.['content-type'] || '').toLowerCase()
+  if (ct.includes('application/json') || ct.includes('text/html')) {
+    // Read the blob back into text so we can surface the actual error
+    // message instead of silently saving a broken .xlsx to disk.
+    const text = await res.data.text()
+    let msg = text
+    try { msg = JSON.parse(text).detail || text } catch { /* keep raw */ }
+    throw new Error(`Export failed: ${String(msg).slice(0, 400)}`)
+  }
+  return res
+}
 export const mapColumns = (sourceColumns) =>
   api.post('/zso/map-columns', { source_columns: sourceColumns })
 
@@ -146,7 +175,13 @@ export const fetchFgLiquidation = (zsoReportId, scope = 'report') => {
 }
 export const fetchVmiSafety = () => api.get('/inventory/vmi-safety')
 export const fetchAllocations = () => api.get('/inventory/allocations')
-export const fetchAllocationDetail = (id) => api.get(`/inventory/allocations/${id}`)
+// Both endpoints return only `limit` allocation rows per call (server-side
+// paginated, sliced from the JSON blob) plus a table-wide `total`, feeding
+// AG Grid's manual pagination footer the same way Master Data does.
+export const fetchAllocationDetail = (id, skip = 0, limit = 25) =>
+  api.get(`/inventory/allocations/${id}`, { params: { skip, limit } })
+export const fetchLatestAllocation = (allocationType, skip = 0, limit = 25) =>
+  api.get('/inventory/allocations/latest', { params: { allocation_type: allocationType, skip, limit } })
 export const deleteStock = (stockType) =>
   api.delete('/inventory/stock', { params: stockType ? { stock_type: stockType } : {} })
 export const deleteAllocations = () => api.delete('/inventory/allocations')
@@ -207,6 +242,8 @@ export const deleteUpload = (uploadId) =>
 export const fetchForexRates = () => api.get('/forex/')
 export const fetchCurrentForexRates = () => api.get('/forex/current')
 export const addForexRate = (data) => api.post('/forex/', data)
+export const updateForexRate = (id, data) => api.patch(`/forex/${id}`, data)
+export const activateForexRate = (id) => api.post(`/forex/${id}/activate`)
 export const deleteForexRate = (id) => api.delete(`/forex/${id}`)
 
 // ─── Internal Forecast Data ──────────────────

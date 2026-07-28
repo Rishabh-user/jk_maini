@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Search, Paperclip, RefreshCw, Play, Trash2, Mail, CheckCircle2, Clock } from 'lucide-react'
+import { Search, Paperclip, RefreshCw, Play, Trash2, Mail, CheckCircle2, Clock, FileText } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
 import { fetchEmails, fetchGmailEmails, processEmail, deleteEmail } from '../services/api'
+import { useDialog } from '../components/DialogProvider'
+import { formatError } from '../utils/formatError'
 
 const STATUS_FILTERS = [
   { key: 'all',         label: 'All',         icon: Mail,          color: 'blue'  },
@@ -9,7 +11,25 @@ const STATUS_FILTERS = [
   { key: 'processed',   label: 'Processed',    icon: CheckCircle2,  color: 'green' },
 ]
 
+// The backend always synthesizes exactly one row named "email_body.html"
+// (or "email_body.txt") per email so the body can be scanned for line
+// items alongside real attachments — see
+// app/services/email_processor.py::_ensure_body_attachment. It is NOT
+// something the sender attached, so it shouldn't be lumped into the
+// "attachments" count the way it silently was before (an email with 7
+// real files showed "8" in the inbox table, which read as a bug).
+const BODY_FILENAMES = new Set(['email_body.html', 'email_body.txt'])
+const isBodyAttachment = (a) => BODY_FILENAMES.has(a?.filename)
+
+function splitAttachments(attachments) {
+  const list = attachments || []
+  const real = list.filter((a) => !isBodyAttachment(a))
+  const hasBody = list.some(isBodyAttachment)
+  return { realCount: real.length, hasBody }
+}
+
 export default function EmailInbox() {
+  const dialog = useDialog()
   const [emails, setEmails]       = useState([])
   const [counts, setCounts]       = useState({ all: 0, processed: 0, unprocessed: 0 })
   const [search, setSearch]       = useState('')
@@ -46,10 +66,10 @@ export default function EmailInbox() {
     setFetching(true)
     try {
       const res = await fetchGmailEmails(20)
-      alert(`Fetched ${res.data.fetched} emails, saved ${res.data.saved} new.`)
+      await dialog.alert(`Fetched ${res.data.fetched} emails, saved ${res.data.saved} new.`, { title: 'Gmail fetch complete' })
       await loadEmails()
     } catch (err) {
-      alert('Gmail fetch failed: ' + (err.response?.data?.detail || err.message))
+      await dialog.alert('Gmail fetch failed', { tone: 'danger', detail: formatError(err) })
     } finally {
       setFetching(false)
     }
@@ -59,23 +79,23 @@ export default function EmailInbox() {
     setProcessing(emailId)
     try {
       const res = await processEmail(emailId)
-      alert(res.data.message)
+      await dialog.alert(res.data.message, { title: 'Processing complete' })
       await loadEmails()
     } catch (err) {
-      alert('Processing failed: ' + (err.response?.data?.detail || err.message))
+      await dialog.alert('Processing failed', { tone: 'danger', detail: formatError(err) })
     } finally {
       setProcessing(null)
     }
   }
 
   const handleDelete = async (emailId) => {
-    if (!confirm('Are you sure you want to delete this email?')) return
+    if (!(await dialog.confirm('Are you sure you want to delete this email?', { title: 'Delete email' }))) return
     setDeleting(emailId)
     try {
       await deleteEmail(emailId)
       await loadEmails()
     } catch (err) {
-      alert('Delete failed: ' + (err.response?.data?.detail || err.message))
+      await dialog.alert('Delete failed', { tone: 'danger', detail: formatError(err) })
     } finally {
       setDeleting(null)
     }
@@ -201,10 +221,32 @@ export default function EmailInbox() {
                     {email.received_at ? new Date(email.received_at).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '—'}
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-600">
-                    <span className="flex items-center gap-1">
-                      <Paperclip size={14} className="text-gray-400" />
-                      {email.attachments?.length || 0}
-                    </span>
+                    {(() => {
+                      const { realCount, hasBody } = splitAttachments(email.attachments)
+                      if (realCount === 0 && !hasBody) {
+                        return <span className="text-gray-400">—</span>
+                      }
+                      return (
+                        <span className="flex items-center gap-2.5" title={
+                          hasBody
+                            ? `${realCount} real attachment${realCount === 1 ? '' : 's'} + the email body (auto-scanned for line items)`
+                            : `${realCount} real attachment${realCount === 1 ? '' : 's'}`
+                        }>
+                          {realCount > 0 && (
+                            <span className="flex items-center gap-1">
+                              <Paperclip size={14} className="text-gray-400" />
+                              {realCount}
+                            </span>
+                          )}
+                          {hasBody && (
+                            <span className="flex items-center gap-1 text-gray-400">
+                              <FileText size={13} />
+                              <span className="text-[11px]">body</span>
+                            </span>
+                          )}
+                        </span>
+                      )
+                    })()}
                   </td>
                   <td className="px-6 py-4">
                     <StatusBadge status={

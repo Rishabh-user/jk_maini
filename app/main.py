@@ -41,10 +41,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# CORS — wildcard "*" plus allow_credentials=True is a browser-rejected
+# combination (the browser silently refuses to attach cookies / Authorization
+# headers to responses from "*"). Read the allowed origins from config,
+# which pulls a comma-separated CORS_ORIGINS from .env. Local dev defaults
+# to Vite (5173) + Next-style (3000) so no config change needed to run.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -666,21 +666,58 @@ async def list_allocations(
     return allocations
 
 
-@router.get("/allocations/{alloc_id}")
-async def get_allocation_detail(
-    alloc_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Get detailed allocation result."""
-    result = await db.execute(select(AllocationResult).where(AllocationResult.id == alloc_id))
-    alloc = result.scalar_one_or_none()
-    if not alloc:
-        raise HTTPException(status_code=404, detail="Allocation not found")
+def _paginate_allocation(alloc: AllocationResult, skip: int, limit: int) -> dict:
+    """Slice the JSON-stored allocations list server-side so only one page's
+    worth ever crosses the wire — allocation rows live in a single JSON blob
+    per AllocationResult (same pattern as ZSOReport.report_data), so "server-side
+    pagination" here means slicing that list per-request rather than a SQL
+    LIMIT/OFFSET, but the wire contract (only `limit` rows + a `total` count)
+    is identical to the Master Data / ZSO Report pages."""
+    all_rows = (alloc.result_data or {}).get("allocations", [])
     return {
         "id": alloc.id,
         "allocation_type": alloc.allocation_type,
         "summary": alloc.summary,
-        "allocations": (alloc.result_data or {}).get("allocations", []),
+        "allocations": all_rows[skip:skip + limit],
+        "total": len(all_rows),
         "created_at": alloc.created_at.isoformat() if alloc.created_at else None,
     }
+
+
+@router.get("/allocations/latest")
+async def get_latest_allocation(
+    allocation_type: str = Query(..., regex="^(fg|wip|combined)$"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(25, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Most recent allocation of a given type, paginated — lets the FG/WIP
+    Allocation tabs show the last "Run Allocation" result on page load
+    instead of only ever showing data during the session that generated it."""
+    result = await db.execute(
+        select(AllocationResult)
+        .where(AllocationResult.allocation_type == allocation_type)
+        .order_by(AllocationResult.created_at.desc(), AllocationResult.id.desc())
+        .limit(1)
+    )
+    alloc = result.scalar_one_or_none()
+    if not alloc:
+        return {"id": None, "allocation_type": allocation_type, "summary": None, "allocations": [], "total": 0, "created_at": None}
+    return _paginate_allocation(alloc, skip, limit)
+
+
+@router.get("/allocations/{alloc_id}")
+async def get_allocation_detail(
+    alloc_id: int,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(25, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get detailed allocation result (paginated)."""
+    result = await db.execute(select(AllocationResult).where(AllocationResult.id == alloc_id))
+    alloc = result.scalar_one_or_none()
+    if not alloc:
+        raise HTTPException(status_code=404, detail="Allocation not found")
+    return _paginate_allocation(alloc, skip, limit)

@@ -114,6 +114,29 @@ def diff_items(old_items: list[dict], new_items: list[dict]) -> dict:
     }
 
 
+def forex_rate_diff(old_forex_used: dict, new_forex_used: dict) -> list[dict]:
+    """Compare the forex rates stamped on two report snapshots.
+
+    Returns one {field, old, new} entry per currency whose active rate
+    differs. This exists because switching the ACTIVE forex rate (Master
+    Data > Forex Rates > Activate) and regenerating a report changes every
+    row's unit_price_inr/total_inr — but diff_items() never sees it,
+    since those computed fields are deliberately excluded from
+    _TRACKED_FIELDS (keeping the version history focused on genuine
+    demand/PO changes rather than currency noise on every single row).
+    Without this separate check, a forex-only regenerate looks identical
+    to diff_items and gets silently discarded as "no changes, return the
+    stale existing report" — even though the actual INR figures did change.
+    """
+    changes = []
+    for cur in sorted(set(old_forex_used) | set(new_forex_used)):
+        old_rate = (old_forex_used.get(cur) or {}).get("rate")
+        new_rate = (new_forex_used.get(cur) or {}).get("rate")
+        if old_rate != new_rate:
+            changes.append({"field": f"forex_rate_{cur}", "old": _s(old_rate), "new": _s(new_rate)})
+    return changes
+
+
 async def find_latest_chain_version(
     db: AsyncSession, new_parts: set[str], doc_class: str, customer: str
 ) -> ReportVersion | None:

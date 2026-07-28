@@ -72,13 +72,55 @@ async def fetch_emails_from_gmail(
     from datetime import date as dt_date
 
     gmail = GmailService()
-    gmail.authenticate()
+
+    # Gmail auth is the #1 failure mode of this endpoint — the refresh
+    # token in token.json goes stale for many reasons (OAuth app in
+    # Testing mode -> auto-expires in 7 days, token manually revoked,
+    # Google password changed, client secret rotated). Previously any of
+    # those bubbled up as a bare 500 "Internal Server Error" with no body
+    # and the user had no idea what was wrong. Turn the two known
+    # RefreshError shapes into a proper 502 that the frontend can render.
+    try:
+        gmail.authenticate()
+    except Exception as e:
+        # google-auth raises `RefreshError` (from google.auth.exceptions)
+        # for expired / revoked tokens. We import lazily so the module
+        # still loads if google-auth changes internally.
+        try:
+            from google.auth.exceptions import RefreshError as GoogleRefreshError
+        except ImportError:
+            GoogleRefreshError = ()
+        if isinstance(e, GoogleRefreshError) or "invalid_grant" in str(e):
+            logger.warning("Gmail token refresh failed: %s", e)
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Gmail authentication expired — please re-authorize. "
+                    "Delete token.json and restart the backend to trigger "
+                    "the OAuth flow, or (in production) publish the OAuth "
+                    "consent screen from 'Testing' to 'In production' so "
+                    "the refresh token stops auto-expiring every 7 days."
+                ),
+            )
+        # Anything else — surface it cleanly instead of a bare 500
+        logger.exception("Gmail auth failed with unexpected error")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gmail authentication failed: {type(e).__name__}: {e}",
+        )
 
     # Default to today's date so we only fetch recent emails
     if not after_date:
         after_date = dt_date.today().strftime("%Y/%m/%d")
 
-    raw_emails = gmail.fetch_unread_emails(max_results=max_results, after_date=after_date)
+    try:
+        raw_emails = gmail.fetch_unread_emails(max_results=max_results, after_date=after_date)
+    except Exception as e:
+        logger.exception("Gmail fetch failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not fetch messages from Gmail: {type(e).__name__}: {e}",
+        )
 
     saved_count = 0
     for email_data in raw_emails:

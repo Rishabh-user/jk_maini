@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, Fragment } from 'react'
 import {
   Upload, FileSpreadsheet, FileText, Image, File, Trash2, RefreshCw,
   CheckCircle2, XCircle, Clock, Loader2, Eye, ChevronDown, ChevronUp,
   Sparkles, Search, Mail
 } from 'lucide-react'
 import { uploadDocument, fetchUploads, processUpload, deleteUpload, fetchAttachmentRawData } from '../services/api'
+import { useDialog } from '../components/DialogProvider'
 
 const FILE_ICONS = {
   pdf: FileText,
@@ -24,6 +25,7 @@ const STATUS_CONFIG = {
 }
 
 export default function UploadDocument() {
+  const dialog = useDialog()
   const [uploads, setUploads] = useState([])
   const [totalCount, setTotalCount] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -66,7 +68,7 @@ export default function UploadDocument() {
         // 409 = identical file already uploaded. Offer to re-upload anyway (force).
         if (err.response?.status === 409) {
           const msg = err.response?.data?.detail || 'This file was already uploaded.'
-          if (window.confirm(`${msg}\n\nUpload it again anyway?`)) {
+          if (await dialog.confirm('Upload it again anyway?', { title: msg, tone: 'default', confirmLabel: 'Upload anyway' })) {
             try {
               const res = await uploadDocument(file, true, true)
               results.push({ success: true, filename: file.name, data: res.data })
@@ -97,17 +99,17 @@ export default function UploadDocument() {
       await processUpload(uploadId)
       loadUploads()
     } catch (err) {
-      alert(err.response?.data?.detail || 'Processing failed')
+      await dialog.alert('Processing failed', { tone: 'danger', detail: err.response?.data?.detail || err.message })
     }
   }
 
   const handleDelete = async (uploadId) => {
-    if (!window.confirm('Delete this upload?')) return
+    if (!(await dialog.confirm('Delete this upload?', { title: 'Delete upload' }))) return
     try {
       await deleteUpload(uploadId)
       loadUploads()
     } catch (err) {
-      alert(err.response?.data?.detail || 'Delete failed')
+      await dialog.alert('Delete failed', { tone: 'danger', detail: err.response?.data?.detail || err.message })
     }
   }
 
@@ -423,9 +425,6 @@ export default function UploadDocument() {
     </div>
   )
 }
-
-// Need Fragment import
-import { Fragment } from 'react'
 
 function RawDataPreview({ uploadId, data, loading }) {
   const [page, setPage] = useState(1)
