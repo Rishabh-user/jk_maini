@@ -187,8 +187,8 @@ export const deleteStock = (stockType) =>
 export const deleteAllocations = () => api.delete('/inventory/allocations')
 
 // ─── Coverage Report ────────────────────────
-export const generateCoverage = (allocationId) => {
-  const params = allocationId ? `?allocation_id=${allocationId}` : ''
+export const generateCoverage = (zsoReportId) => {
+  const params = zsoReportId ? `?zso_report_id=${zsoReportId}` : ''
   return api.post(`/coverage/generate${params}`)
 }
 export const fetchCoverageReport = (reportId) => {

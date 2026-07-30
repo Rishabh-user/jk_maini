@@ -540,7 +540,10 @@ export default function MasterData() {
   const defaultColDef = useMemo(() => ({
     sortable: true,
     resizable: true,
-    cellStyle: { color: '#374151', fontSize: '13px', display: 'flex', alignItems: 'center' },
+    // No display:flex here — it disables AG Grid's built-in cell clipping and
+    // lets long values (e.g. Location/Country) bleed into the next column. The
+    // native cell already clips with ellipsis and vertically centers text.
+    cellStyle: { color: '#374151', fontSize: '13px' },
   }), [])
 
   const openAdd = () => {
@@ -605,27 +608,18 @@ export default function MasterData() {
     setUploading(true)
     try {
       const res = await uploadMasterData(file)
-      const { inserted, updated, total_rows, column_mapping, unmapped_columns } = res.data
+      const { inserted, updated, total_rows, unmapped_columns } = res.data
 
-      // Surface exactly what the alias list + Claude decided for each
-      // column — mapped columns went straight to a known field; anything
-      // in unmapped_columns is still fully preserved, just as an "extra"
-      // column (visible in the grid) rather than a fixed schema field.
-      const mappedCount = column_mapping
-        ? Object.values(column_mapping).filter((v) => v !== 'UNMAPPED').length
-        : 0
-      const mappingLines = column_mapping
-        ? Object.entries(column_mapping).map(([src, field]) => `  "${src}" -> ${field}`).join('\n')
-        : ''
+      // Keep it to a plain one-liner. Only mention extra columns when a
+      // *meaningful* one was kept (serial/index headers are filtered server-
+      // side, so they won't show up here); the full field-by-field mapping
+      // is intentionally not surfaced to the end user.
       const extraNote = unmapped_columns?.length
-        ? `\n\n${unmapped_columns.length} column(s) didn't match a known field — kept as extra data (still visible as columns in the grid, nothing was dropped):\n  ${unmapped_columns.join(', ')}`
+        ? ` (${unmapped_columns.length} extra column${unmapped_columns.length > 1 ? 's' : ''} kept: ${unmapped_columns.join(', ')})`
         : ''
 
       await dialog.alert('Upload complete!', {
-        detail:
-          `${total_rows} rows processed - ${inserted} new, ${updated} updated\n` +
-          `${mappedCount} column(s) mapped to known fields via alias/AI matching:\n${mappingLines}` +
-          extraNote,
+        detail: `${total_rows} rows uploaded — ${inserted} new, ${updated} updated.${extraNote}`,
       })
       await load()
       // Prompt for a forex rate right after upload — new/updated parts
