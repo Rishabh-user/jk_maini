@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     GMAIL_CREDENTIALS_FILE: str = "credentials.json"
     GMAIL_TOKEN_FILE: str = "token.json"
     GMAIL_SCOPES: str = "https://www.googleapis.com/auth/gmail.modify"
+    # Base64-encoded token.json — fallback auth path for headless servers
+    # (no browser to complete the interactive OAuth consent screen). Same
+    # value you'd set as GMAIL_TOKEN_B64 on Render; settable here too so
+    # local runs can exercise the identical code path.
+    GMAIL_TOKEN_B64: str = ""
 
     # Claude AI
     ANTHROPIC_API_KEY: str = ""

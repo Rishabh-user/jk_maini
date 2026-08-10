@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from sqlalchemy import select
@@ -23,57 +22,41 @@ class GmailService:
     def __init__(self):
         self.service = None
         self.scopes = [settings.GMAIL_SCOPES]
+        self.creds: Credentials | None = None
 
-    def authenticate(self) -> None:
-        creds = None
-        if os.path.exists(settings.GMAIL_TOKEN_FILE):
-            creds = Credentials.from_authorized_user_file(settings.GMAIL_TOKEN_FILE, self.scopes)
+    def authenticate(self, stored_creds: Credentials | None) -> bool:
+        """Build the Gmail API client from already-loaded credentials
+        (see app.services.gmail_oauth.load_credentials — that's the DB
+        lookup; this method has no DB access of its own, so it stays sync).
+
+        Returns True if the access token was refreshed just now, meaning
+        the caller should persist the updated credentials back to storage.
+        Raises RuntimeError if there's nothing usable — the caller should
+        then point the user at the "Re-authorize Gmail" flow.
+        """
+        creds = stored_creds
+        refreshed = False
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                logger.info("Gmail token expired, refreshing...")
+                logger.info("Gmail access token expired, refreshing...")
                 creds.refresh(Request())
-                # Save refreshed token back to file
-                try:
-                    with open(settings.GMAIL_TOKEN_FILE, "w") as token:
-                        token.write(creds.to_json())
-                    logger.info("Refreshed Gmail token saved to file")
-                except Exception as e:
-                    logger.warning(f"Could not save refreshed token to file: {e}")
+                refreshed = True
             else:
-                # Try local browser-based OAuth flow first (dev / local machine).
-                # Falls back to GMAIL_TOKEN_B64 env var for headless production servers.
-                token_b64 = os.environ.get("GMAIL_TOKEN_B64", "").strip()
-                if token_b64:
-                    import base64 as _b64
-                    token_json = _b64.b64decode(token_b64).decode("utf-8")
-                    import tempfile, json as _json
-                    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-                    tmp.write(token_json); tmp.flush(); tmp.close()
-                    creds = Credentials.from_authorized_user_file(tmp.name, self.scopes)
-                    os.unlink(tmp.name)
-                elif os.path.exists(settings.GMAIL_CREDENTIALS_FILE):
-                    logger.info("No valid Gmail token — launching browser OAuth flow...")
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        settings.GMAIL_CREDENTIALS_FILE, self.scopes
-                    )
-                    creds = flow.run_local_server(port=0)
-                    with open(settings.GMAIL_TOKEN_FILE, "w") as token:
-                        token.write(creds.to_json())
-                    logger.info("New Gmail token saved to token.json")
-                else:
-                    raise RuntimeError(
-                        "Gmail token is missing and credentials.json not found. "
-                        "Place credentials.json in the project root or set GMAIL_TOKEN_B64."
-                    )
+                raise RuntimeError(
+                    "No valid Gmail credentials. Use the 'Re-authorize Gmail' "
+                    "button to connect a Gmail account."
+                )
 
+        self.creds = creds
         self.service = build("gmail", "v1", credentials=creds)
         logger.info("Gmail API authenticated successfully")
+        return refreshed
 
     def fetch_unread_emails(self, max_results: int = 20, after_date: str | None = None) -> list[dict]:
         """Fetch unread emails. after_date format: 'YYYY/MM/DD'"""
         if not self.service:
-            self.authenticate()
+            raise RuntimeError("authenticate() must be called before fetch_unread_emails()")
 
         query = "is:unread"
         if after_date:
@@ -202,7 +185,7 @@ class GmailService:
 
     def mark_as_read(self, message_id: str) -> None:
         if not self.service:
-            self.authenticate()
+            raise RuntimeError("authenticate() must be called before mark_as_read()")
 
         self.service.users().messages().modify(
             userId="me",

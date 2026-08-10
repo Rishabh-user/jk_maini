@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import String, Text, DateTime, Enum, Integer, ForeignKey, func
+from sqlalchemy import String, Text, DateTime, Enum, Integer, ForeignKey, JSON, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -47,3 +47,22 @@ class Attachment(Base):
 
     email: Mapped["Email"] = relationship(back_populates="attachments")
     raw_data: Mapped[list["RawData"]] = relationship(back_populates="attachment", lazy="selectin", cascade="all, delete-orphan")
+
+
+class GmailCredential(Base):
+    """OAuth token for the single Gmail mailbox this app connects to.
+
+    Stored as a DB row rather than token.json — a file-based token silently
+    vanishes on every Render redeploy (the disk doesn't persist), which was
+    the recurring cause of "Gmail authentication expired" needing a manual
+    fix each time. One row (the app connects exactly one mailbox), upserted
+    on every re-authorization and every access-token refresh.
+    """
+    __tablename__ = "gmail_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    account_email: Mapped[str | None] = mapped_column(String(255))
+    token_data: Mapped[dict] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

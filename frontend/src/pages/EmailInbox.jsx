@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Search, Paperclip, RefreshCw, Play, Trash2, Mail, CheckCircle2, Clock, FileText } from 'lucide-react'
+import { Search, Paperclip, RefreshCw, Play, Trash2, Mail, CheckCircle2, Clock, FileText, PlugZap } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
-import { fetchEmails, fetchGmailEmails, processEmail, deleteEmail } from '../services/api'
+import { fetchEmails, fetchGmailEmails, fetchGmailStatus, gmailAuthorize, processEmail, deleteEmail } from '../services/api'
 import { useDialog } from '../components/DialogProvider'
 import { formatError } from '../utils/formatError'
 
@@ -38,6 +38,36 @@ export default function EmailInbox() {
   const [fetching, setFetching]   = useState(false)
   const [processing, setProcessing] = useState(null)
   const [deleting, setDeleting]   = useState(null)
+  // null = not checked yet, true/false = known connection state
+  const [gmailConnected, setGmailConnected] = useState(null)
+  const [authorizing, setAuthorizing] = useState(false)
+
+  const loadGmailStatus = useCallback(async () => {
+    try {
+      const res = await fetchGmailStatus()
+      setGmailConnected(res.data.connected)
+    } catch {
+      setGmailConnected(false)
+    }
+  }, [])
+
+  useEffect(() => { loadGmailStatus() }, [loadGmailStatus])
+
+  // Opens Google's consent screen in a new tab — works the same whether
+  // this app is pointed at a local or production backend, since the
+  // browser doing the authorizing is the user's own, not one the backend
+  // has to launch itself.
+  const handleReauthorize = async () => {
+    setAuthorizing(true)
+    try {
+      const res = await gmailAuthorize()
+      window.open(res.data.authorization_url, '_blank', 'noopener,noreferrer')
+    } catch (err) {
+      await dialog.alert('Could not start Gmail authorization', { tone: 'danger', detail: formatError(err) })
+    } finally {
+      setAuthorizing(false)
+    }
+  }
 
   const loadEmails = useCallback(async () => {
     try {
@@ -68,12 +98,24 @@ export default function EmailInbox() {
       const res = await fetchGmailEmails(20)
       await dialog.alert(`Fetched ${res.data.fetched} emails, saved ${res.data.saved} new.`, { title: 'Gmail fetch complete' })
       await loadEmails()
+      setGmailConnected(true)
     } catch (err) {
       await dialog.alert('Gmail fetch failed', { tone: 'danger', detail: formatError(err) })
+      await loadGmailStatus()
     } finally {
       setFetching(false)
     }
   }
+
+  // Re-authorizing happens in a separate tab (Google's consent screen) —
+  // catch the user coming back to this one and refresh the connection
+  // status automatically instead of leaving the stale "disconnected" badge
+  // showing after they've actually just fixed it.
+  useEffect(() => {
+    const onFocus = () => loadGmailStatus()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [loadGmailStatus])
 
   const handleProcess = async (emailId) => {
     setProcessing(emailId)
@@ -133,14 +175,35 @@ export default function EmailInbox() {
             Incoming purchase orders and communications
           </p>
         </div>
-        <button
-          onClick={handleFetchGmail}
-          disabled={fetching}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-        >
-          <RefreshCw size={16} className={fetching ? 'animate-spin' : ''} />
-          Fetch from Gmail
-        </button>
+        <div className="flex items-center gap-2">
+          {gmailConnected === false && (
+            <span className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded-full">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+              Gmail disconnected
+            </span>
+          )}
+          <button
+            onClick={handleReauthorize}
+            disabled={authorizing}
+            title="Opens Google's login in a new tab to (re)connect this app's Gmail access"
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg disabled:opacity-50 ${
+              gmailConnected === false
+                ? 'bg-red-600 text-white hover:bg-red-700'
+                : 'border border-gray-200 text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <PlugZap size={16} />
+            Re-authorize Gmail
+          </button>
+          <button
+            onClick={handleFetchGmail}
+            disabled={fetching}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+          >
+            <RefreshCw size={16} className={fetching ? 'animate-spin' : ''} />
+            Fetch from Gmail
+          </button>
+        </div>
       </div>
 
       {/* Status filter cards */}
