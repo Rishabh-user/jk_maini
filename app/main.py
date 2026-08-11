@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 
 from app.db.session import engine, Base
 from app.models import (  # noqa: F401 — register models
-    User, Email, Attachment, RawData, MainiPart, ZSOReport,
+    User, Email, Attachment, GmailCredential, RawData, MainiPart, ZSOReport,
     DemandUpload, InventoryStock, AllocationResult,
     CoverageReport, SalesData, BudgetData, ForexRate, ForecastEntry, MasterDataCorrection,
     DemandFollowUp, DemandLine, ReportVersion, ReportChange,

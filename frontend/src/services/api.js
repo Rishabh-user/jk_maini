@@ -57,6 +57,8 @@ export const fetchEmails = (skip = 0, limit = 50, status, includeManual = false)
 export const fetchEmailById = (id) => api.get(`/emails/${id}`)
 export const fetchGmailEmails = (maxResults = 20) =>
   api.post(`/emails/fetch?max_results=${maxResults}`)
+export const fetchGmailStatus = () => api.get('/emails/gmail/status')
+export const gmailAuthorize = () => api.get('/emails/gmail/authorize')
 export const processEmail = (id) => api.post(`/emails/process-email/${id}`)
 export const deleteEmail = (id) => api.delete(`/emails/${id}`)
 

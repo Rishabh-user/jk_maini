@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,6 +8,7 @@ from app.models.user import User, UserRole
 from app.models.email import Email, EmailStatus
 from app.schemas.email import EmailResponse, EmailListResponse, ProcessEmailResponse
 from app.services.gmail_service import GmailService, save_email_to_db
+from app.services import gmail_oauth
 from app.services.email_processor import process_email
 from app.utils.config import get_settings
 from app.utils.security import get_current_user, require_roles
@@ -62,6 +64,70 @@ async def get_email(
     return email
 
 
+@router.get("/gmail/status")
+async def gmail_status(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Whether a usable Gmail connection exists — drives the "Re-authorize
+    Gmail" button's state in the UI without needing to attempt a real fetch."""
+    creds = await gmail_oauth.load_credentials(db)
+    if not creds:
+        return {"connected": False, "reason": "no_credentials"}
+    if creds.valid:
+        return {"connected": True}
+    if creds.expired and creds.refresh_token:
+        # Access token is stale but should self-refresh on next use —
+        # still "connected", not something the user needs to act on.
+        return {"connected": True}
+    return {"connected": False, "reason": "invalid"}
+
+
+@router.get("/gmail/authorize")
+async def gmail_authorize(
+    request: Request,
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.KAS)),
+):
+    """Returns a Google consent-screen URL for the frontend to open in a new
+    tab. Works identically whether this backend is running on localhost or
+    on Render — unlike the old InstalledAppFlow popup, which needed a
+    browser on the same machine as the backend (impossible on a server)."""
+    redirect_uri = str(request.base_url).rstrip("/") + "/emails/gmail/callback"
+    auth_url = gmail_oauth.get_authorization_url(redirect_uri)
+    return {"authorization_url": auth_url}
+
+
+@router.get("/gmail/callback", response_class=HTMLResponse)
+async def gmail_callback(
+    request: Request,
+    code: str = Query(None),
+    state: str = Query(None),
+    error: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Google redirects the user's browser here after they approve (or deny)
+    access. Not JWT-protected — Google's redirect can't carry our Bearer
+    token — gated instead by the one-time `state` nonce issued in
+    /gmail/authorize, which only an already-authenticated admin/KAS could
+    have obtained."""
+    def page(message: str) -> str:
+        return f"<html><body style='font-family:sans-serif;padding:40px;text-align:center'><h3>{message}</h3></body></html>"
+
+    if error:
+        return HTMLResponse(page(f"Gmail authorization was not completed: {error}. You can close this window."), status_code=400)
+    if not code or not state or not gmail_oauth.verify_state(state):
+        return HTMLResponse(page("This authorization link is invalid or has expired. Please try again from the app."), status_code=400)
+
+    redirect_uri = str(request.base_url).rstrip("/") + "/emails/gmail/callback"
+    try:
+        await gmail_oauth.exchange_code(db, redirect_uri, code)
+    except Exception as e:
+        logger.exception("Gmail OAuth callback failed")
+        return HTMLResponse(page(f"Authorization failed: {e}"), status_code=400)
+
+    return HTMLResponse(page("Gmail connected successfully — you can close this window."))
+
+
 @router.post("/fetch", response_model=dict)
 async def fetch_emails_from_gmail(
     max_results: int = Query(20, ge=1, le=50),
@@ -72,20 +138,21 @@ async def fetch_emails_from_gmail(
     from datetime import date as dt_date
 
     gmail = GmailService()
+    stored_creds = await gmail_oauth.load_credentials(db)
 
     # Gmail auth is the #1 failure mode of this endpoint — the refresh
-    # token in token.json goes stale for many reasons (OAuth app in
-    # Testing mode -> auto-expires in 7 days, token manually revoked,
-    # Google password changed, client secret rotated). Previously any of
-    # those bubbled up as a bare 500 "Internal Server Error" with no body
-    # and the user had no idea what was wrong. Turn the two known
-    # RefreshError shapes into a proper 502 that the frontend can render.
+    # token goes stale for many reasons (OAuth app in Testing mode ->
+    # auto-expires in 7 days, token manually revoked, Google password
+    # changed, client secret rotated). Turn the known failure shapes into
+    # a proper 502 that points at the "Re-authorize Gmail" button instead
+    # of a bare 500 with no explanation.
     try:
-        gmail.authenticate()
+        refreshed = gmail.authenticate(stored_creds)
+        if refreshed:
+            await gmail_oauth.save_credentials(db, gmail.creds)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
-        # google-auth raises `RefreshError` (from google.auth.exceptions)
-        # for expired / revoked tokens. We import lazily so the module
-        # still loads if google-auth changes internally.
         try:
             from google.auth.exceptions import RefreshError as GoogleRefreshError
         except ImportError:
@@ -95,14 +162,12 @@ async def fetch_emails_from_gmail(
             raise HTTPException(
                 status_code=502,
                 detail=(
-                    "Gmail authentication expired — please re-authorize. "
-                    "Delete token.json and restart the backend to trigger "
-                    "the OAuth flow, or (in production) publish the OAuth "
-                    "consent screen from 'Testing' to 'In production' so "
-                    "the refresh token stops auto-expiring every 7 days."
+                    "Gmail authentication expired — please click "
+                    "'Re-authorize Gmail' to reconnect, or (to stop this "
+                    "recurring) publish the OAuth consent screen from "
+                    "'Testing' to 'In production' in Google Cloud Console."
                 ),
             )
-        # Anything else — surface it cleanly instead of a bare 500
         logger.exception("Gmail auth failed with unexpected error")
         raise HTTPException(
             status_code=502,
