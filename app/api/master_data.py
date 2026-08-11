@@ -20,6 +20,19 @@ from app.utils.logging import logger
 
 router = APIRouter(prefix="/master-data", tags=["Master Data"])
 
+# Serial/index columns carry no business value (they're just row numbers), so
+# they're never kept as extra_data nor shown as grid columns. Compared on a
+# compact, punctuation/space-stripped, lowercased form of the header.
+_INDEX_HEADERS = {
+    "sno", "slno", "srno", "serialno", "serial", "serialnumber",
+    "index", "rowno", "row", "#",
+}
+
+
+def _is_index_header(header) -> bool:
+    c = normalize_header(header).replace(".", "").replace(" ", "")
+    return c == "" or c in _INDEX_HEADERS
+
 
 def _match_column(header: str) -> str | None:
     """Quick alias-only lookup — used ONLY for header-row auto-detection
@@ -112,7 +125,7 @@ async def list_master_data(
         if not ed:
             continue
         for k in ed.keys():
-            if k not in seen:
+            if k not in seen and not _is_index_header(k):
                 seen.add(k)
                 extra_columns.append(k)
 
@@ -187,7 +200,8 @@ async def upload_master_data(
     # Track which original headers ended up UNMAPPED, purely for the
     # response summary shown in the UI after upload.
     unmapped_headers = sorted({
-        col for col, field in column_mapping.items() if field == UNMAPPED
+        col for col, field in column_mapping.items()
+        if field == UNMAPPED and not _is_index_header(col)
     })
 
     for _, row in df.iterrows():
@@ -206,7 +220,7 @@ async def upload_master_data(
                 val = _clean_text_value(val)
 
             if db_field == UNMAPPED:
-                if val is not None:
+                if val is not None and not _is_index_header(excel_col):
                     extras[str(excel_col)] = val
             else:
                 record[db_field] = val

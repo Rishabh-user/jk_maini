@@ -13,104 +13,126 @@ router = APIRouter(prefix="/coverage", tags=["Coverage Report"])
 
 @router.post("/generate")
 async def generate_coverage(
-    allocation_id: int = Query(None),
+    zso_report_id: int = Query(None, description="Demand source; defaults to the latest ZSO report."),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.KAS)),
 ):
-    """Generate a coverage report from allocation results."""
-    # Get allocation
-    if allocation_id:
-        alloc_result = await db.execute(
-            select(AllocationResult).where(AllocationResult.id == allocation_id)
-        )
+    """Generate a coverage report — demand vs stock, per part.
+
+    Self-contained: reads classified stock (FG / WIP / RM / in-transit) and
+    firm **PO demand** from a ZSO directly (no Run-Allocation step needed).
+
+    Coverage counts **FG + WIP only** (same units as the demanded part). RM
+    stock and RM in-transit are shown for context but **not counted** toward
+    coverage — converting raw/child into finished-equivalent units needs the
+    BOM (tracker #9). RM-on-order needs a purchasing file we don't have yet.
+    Reported in both **quantity and value** (qty × master unit price).
+    """
+    from app.api.inventory import _latest_classified_uploads, _effective_annotated_rows, _is_forecast_line
+    from app.services.stock_service import part_breakdown
+    from app.models.data import MainiPart
+
+    # ── Stock ──
+    uploads = await _latest_classified_uploads(db)
+    breakdown = part_breakdown(_effective_annotated_rows(uploads))
+
+    # ── Demand (firm PO only) ──
+    if zso_report_id:
+        zso = (await db.execute(select(ZSOReport).where(ZSOReport.id == zso_report_id))).scalar_one_or_none()
     else:
-        alloc_result = await db.execute(
-            select(AllocationResult).order_by(AllocationResult.created_at.desc()).limit(1)
-        )
-    alloc = alloc_result.scalar_one_or_none()
-    if not alloc:
-        raise HTTPException(status_code=404, detail="No allocation results found. Run allocation first.")
+        zso = (await db.execute(select(ZSOReport).order_by(ZSOReport.created_at.desc()).limit(1))).scalar_one_or_none()
+    if not zso:
+        raise HTTPException(status_code=404, detail="No ZSO report found. Generate a ZSO report first.")
 
-    allocations = (alloc.result_data or {}).get("allocations", [])
+    demand_by_part: dict[str, float] = {}
+    for item in (zso.report_data or {}).get("items", []):
+        if _is_forecast_line(item):
+            continue
+        mp = str(item.get("maini_part_no") or "").strip()
+        if mp:
+            demand_by_part[mp] = demand_by_part.get(mp, 0.0) + float(item.get("open_qty", item.get("quantity", 0)) or 0)
 
-    # Build coverage data
-    coverage_rows = []
-    exceptions = []
-    full_count = 0
-    partial_count = 0
-    low_count = 0
-    no_count = 0
+    # ── Price / master enrichment ──
+    price_map: dict[str, dict] = {}
+    for mp, cust, cname, price, curr in (await db.execute(
+        select(MainiPart.maini_part_no, MainiPart.customer_part_no, MainiPart.customer_name,
+               MainiPart.unit_price, MainiPart.currency)
+    )).all():
+        key = (mp or "").strip()
+        if key and key not in price_map:
+            price_map[key] = {"cust_part_no": cust, "customer": cname, "unit_price": price, "currency": (curr or "INR").upper()}
 
-    for item in allocations:
-        demand_qty = float(item.get("demand_qty", 0) or 0)
-        fg_stock = float(item.get("total_fg", 0) or 0)
-        wip_qty = float(item.get("wip_qty", 0) or 0)
-        rm_stock = 0  # RM data not yet integrated
-        rm_in_orders = 0
+    coverage_rows, exceptions = [], []
+    counts = {"full": 0, "partial": 0, "low": 0, "none": 0}
+    value_by_currency: dict[str, dict] = {}
 
-        total_coverage = fg_stock + wip_qty + rm_stock + rm_in_orders
-        gap = max(0, demand_qty - total_coverage)
+    for mp, demand_qty in demand_by_part.items():
+        demand_qty = round(demand_qty, 2)
+        b = breakdown.get(mp, {})
+        fg = round(b.get("fg", 0.0), 2)
+        wip = round(b.get("wip", 0.0), 2)
+        rm = round(b.get("rm", 0.0), 2)
+        in_transit = round(b.get("in_transit", 0.0), 2)
+
+        # FG + WIP only count toward coverage (RM/in-transit shown, not counted)
+        total_coverage = round(fg + wip, 2)
+        gap = round(max(0.0, demand_qty - total_coverage), 2)
         coverage_pct = round((total_coverage / demand_qty * 100), 1) if demand_qty > 0 else 0
 
         if coverage_pct >= 100:
             level = "full"
-            full_count += 1
         elif coverage_pct >= 70:
             level = "partial"
-            partial_count += 1
         elif coverage_pct >= 30:
             level = "low"
-            low_count += 1
         else:
             level = "none"
-            no_count += 1
+        counts[level] += 1
 
-        row = {
-            "cust_part_no": item.get("cust_part_no", ""),
-            "maini_part_no": item.get("maini_part_no", ""),
-            "customer": item.get("customer", ""),
+        meta = price_map.get(mp, {})
+        price = meta.get("unit_price")
+        currency = (meta.get("currency") or "INR").upper()
+        demand_value = round(demand_qty * price, 2) if price else None
+        coverage_value = round(total_coverage * price, 2) if price else None
+        gap_value = round(gap * price, 2) if price else None
+        if demand_value is not None:
+            v = value_by_currency.setdefault(currency, {"demand": 0.0, "coverage": 0.0, "gap": 0.0})
+            v["demand"] += demand_value; v["coverage"] += coverage_value or 0; v["gap"] += gap_value or 0
+
+        coverage_rows.append({
+            "cust_part_no": meta.get("cust_part_no") or "",
+            "maini_part_no": mp,
+            "customer": meta.get("customer") or "",
             "demand_qty": demand_qty,
-            "fg_stock": fg_stock,
-            "wip": wip_qty,
-            "rm_stock": rm_stock,
-            "rm_in_orders": rm_in_orders,
-            "total_coverage": total_coverage,
-            "gap": gap,
-            "coverage_pct": coverage_pct,
-            "level": level,
-        }
-        coverage_rows.append(row)
+            "fg_stock": fg, "wip": wip,
+            "rm_stock": rm, "rm_in_transit": in_transit, "rm_in_orders": None,  # on-order pending client file
+            "total_coverage": total_coverage, "gap": gap, "coverage_pct": coverage_pct, "level": level,
+            "unit_price": price, "currency": currency,
+            "demand_value": demand_value, "coverage_value": coverage_value, "gap_value": gap_value,
+        })
 
-        # Add exception for low or no coverage
         if level in ("low", "none"):
-            severity = "critical" if level == "none" else "warning"
-            issue_type = "No stock available" if level == "none" else "Significant shortfall"
             exceptions.append({
-                "cust_part_no": item.get("cust_part_no", ""),
-                "maini_part_no": item.get("maini_part_no", ""),
-                "customer": item.get("customer", ""),
-                "issue_type": issue_type,
-                "demand_qty": demand_qty,
-                "available": total_coverage,
-                "shortfall": gap,
-                "severity": severity,
-                "action_required": "Urgent procurement" if severity == "critical" else "Review production plan",
+                "cust_part_no": meta.get("cust_part_no") or "", "maini_part_no": mp,
+                "customer": meta.get("customer") or "",
+                "issue_type": "No stock available" if level == "none" else "Significant shortfall",
+                "demand_qty": demand_qty, "available": total_coverage, "shortfall": gap,
+                "severity": "critical" if level == "none" else "warning",
+                "action_required": "Urgent procurement" if level == "none" else "Review production plan",
             })
+
+    coverage_rows.sort(key=lambda r: (r["gap_value"] or 0, r["gap"]), reverse=True)
 
     report_data = {
         "rows": coverage_rows,
-        "summary": {
-            "full": full_count,
-            "partial": partial_count,
-            "low": low_count,
-            "none": no_count,
-            "total": len(coverage_rows),
-        },
+        "summary": {**counts, "total": len(coverage_rows),
+                    "value_by_currency": {k: {kk: round(vv, 2) for kk, vv in v.items()} for k, v in value_by_currency.items()},
+                    "zso_report_id": zso.id},
     }
 
     coverage = CoverageReportModel(
         created_by=current_user.id,
-        allocation_id=alloc.id,
+        allocation_id=None,   # self-contained now — not derived from an allocation run
         report_data=report_data,
         exceptions={"items": exceptions},
         status="generated",
@@ -118,7 +140,7 @@ async def generate_coverage(
     db.add(coverage)
     await db.flush()
 
-    logger.info(f"Coverage report generated: full={full_count}, partial={partial_count}, low={low_count}, none={no_count}")
+    logger.info(f"Coverage generated from ZSO #{zso.id}: {counts}, parts={len(coverage_rows)}")
     return {
         "id": coverage.id,
         "summary": report_data["summary"],
