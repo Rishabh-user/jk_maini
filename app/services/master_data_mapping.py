@@ -209,9 +209,10 @@ async def map_master_data_columns(
     if not unresolved:
         return mapping
 
-    if not settings.ANTHROPIC_API_KEY:
+    from app.services import llm
+    if not llm.ai_enabled():
         logger.warning(
-            "master_data_mapping: ANTHROPIC_API_KEY not set — using keyword "
+            "master_data_mapping: no AI key for active provider — using keyword "
             "fallback for %d unresolved column(s): %s",
             len(unresolved), unresolved,
         )
@@ -220,15 +221,9 @@ async def map_master_data_columns(
         return mapping
 
     try:
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
         prompt = _build_prompt(unresolved, sample_values)
-        message = client.messages.create(
-            model=settings.AI_MODEL,
-            max_tokens=1024,
-            temperature=0,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        response_text = message.content[0].text.strip()
+        response_text = await llm.complete_json(prompt, kind="map", max_tokens=1024, temperature=0)
+        response_text = (response_text or "").strip()
         if "```" in response_text:
             json_start = response_text.find("{")
             json_end = response_text.rfind("}") + 1

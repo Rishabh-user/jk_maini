@@ -79,8 +79,9 @@ async def extract_with_ai(
     """
     empty = {"columns": [], "rows": [], "instructions": []}
 
-    if not settings.ANTHROPIC_API_KEY:
-        logger.warning("AI extraction skipped — ANTHROPIC_API_KEY not set")
+    from app.services import llm
+    if not llm.ai_enabled():
+        logger.warning("AI extraction skipped — no API key for the active AI_PROVIDER")
         return empty
 
     text = _truncate(text)
@@ -90,14 +91,7 @@ async def extract_with_ai(
     if not text and not html and not images:
         return empty
 
-    # Build the user content blocks
-    content: list[dict] = []
-    for media_type, b64 in images:
-        content.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": media_type, "data": b64},
-        })
-
+    # Build the combined user text (provider-neutral; llm.py wraps images per provider)
     parts = []
     if source_hint:
         parts.append(f"Source: {source_hint}")
@@ -106,28 +100,18 @@ async def extract_with_ai(
     if html:
         parts.append("=== HTML CONTENT (may contain tables) ===\n" + html)
     if images:
-        parts.append(f"=== {len(images)} IMAGE(S) ATTACHED ABOVE — extract any tables/line items visible in them ===")
-    content.append({"type": "text", "text": "\n\n".join(parts) or "(no text)"})
+        parts.append(f"=== {len(images)} IMAGE(S) ATTACHED — extract any tables/line items visible in them ===")
+    user_text = "\n\n".join(parts) or "(no text)"
 
     try:
-        client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-        message = await client.messages.create(
-            model=settings.EXTRACTION_MODEL,
-            max_tokens=8000,
-            system=_SYSTEM,
-            messages=[{"role": "user", "content": content}],
-        )
+        raw = await llm.complete_vision_json(system=_SYSTEM, user_text=user_text, images=images, max_tokens=8000)
     except Exception as e:
         logger.error(f"AI extraction API call failed ({source_hint}): {e}")
         return empty
 
-    raw = ""
-    for block in message.content:
-        if getattr(block, "type", None) == "text":
-            raw += block.text
-    raw = raw.strip()
-
-    # Strip markdown fences if present
+    raw = (raw or "").strip()
+    # Strip markdown fences if present (OpenAI JSON mode returns clean JSON; this
+    # only matters for the Anthropic provider path).
     if "```" in raw:
         start = raw.find("{")
         end = raw.rfind("}") + 1
@@ -154,8 +138,7 @@ async def extract_with_ai(
     columns = list(clean_rows[0].keys()) if clean_rows else []
     logger.info(
         f"AI extraction ({source_hint}): {len(clean_rows)} rows, "
-        f"{len(instructions)} instructions "
-        f"[tokens in={message.usage.input_tokens} out={message.usage.output_tokens}]"
+        f"{len(instructions)} instructions"
     )
     return {
         "columns": columns,

@@ -30,8 +30,22 @@ def _items(report_data: dict | None) -> list[dict]:
     return []
 
 
+def _is_forecast(item: dict) -> bool:
+    """A line is forecast (planning data) if its PO label contains 'forecast'."""
+    return "forecast" in _s(item.get("po_forecast")).lower()
+
+
+def firm_items(items: list[dict]) -> list[dict]:
+    """Only firm PO lines — forecast rows are auto-injected planning data and
+    are the SAME across every report for a customer, so including them in
+    version matching/diffs makes unrelated uploads look identical (over-eager
+    chaining) and floods the deltas with forecast churn. Versioning is about
+    the firm demand document, so we compare firm lines only."""
+    return [i for i in items if not _is_forecast(i)]
+
+
 def part_set(items: list[dict]) -> set[str]:
-    return {_s(i.get("cust_part_no")).lower() for i in items if _s(i.get("cust_part_no"))}
+    return {_s(i.get("cust_part_no")).lower() for i in firm_items(items) if _s(i.get("cust_part_no"))}
 
 
 def document_class(items: list[dict]) -> str:
@@ -72,8 +86,10 @@ def diff_items(old_items: list[dict], new_items: list[dict]) -> dict:
     Returns added / removed / modified lists + unchanged count. `modified` entries
     carry per-field old→new changes.
     """
-    old_by = {_row_key(i): i for i in old_items}
-    new_by = {_row_key(i): i for i in new_items}
+    # Forecast rows are injected planning data (identical across reports) — they
+    # aren't part of the firm demand document, so exclude them from the diff.
+    old_by = {_row_key(i): i for i in firm_items(old_items)}
+    new_by = {_row_key(i): i for i in firm_items(new_items)}
 
     added, removed, modified = [], [], []
     unchanged = 0
@@ -107,7 +123,7 @@ def diff_items(old_items: list[dict], new_items: list[dict]) -> dict:
         "unchanged": unchanged,
         "has_changes": bool(added or removed or modified),
         "counts": {
-            "total": len(new_items),
+            "total": len(new_by),   # firm PO lines only (forecast excluded)
             "added": len(added), "removed": len(removed),
             "modified": len(modified), "unchanged": unchanged,
         },

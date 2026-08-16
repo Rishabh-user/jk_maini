@@ -135,7 +135,7 @@ async def fetch_emails_from_gmail(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.KAS)),
 ):
-    from datetime import date as dt_date
+    from datetime import date as dt_date, timedelta
 
     gmail = GmailService()
     stored_creds = await gmail_oauth.load_credentials(db)
@@ -174,9 +174,12 @@ async def fetch_emails_from_gmail(
             detail=f"Gmail authentication failed: {type(e).__name__}: {e}",
         )
 
-    # Default to today's date so we only fetch recent emails
+    # Default to the last 2 days (today + yesterday). Fetching only "today"
+    # silently returned 0 for mail that arrived just before midnight (day/
+    # timezone rollover); a 2-day window covers that without flooding the
+    # results with a week of unrelated mail. Still unread-only.
     if not after_date:
-        after_date = dt_date.today().strftime("%Y/%m/%d")
+        after_date = (dt_date.today() - timedelta(days=2)).strftime("%Y/%m/%d")
 
     try:
         raw_emails = gmail.fetch_unread_emails(max_results=max_results, after_date=after_date)
