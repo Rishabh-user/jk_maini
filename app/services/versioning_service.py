@@ -35,13 +35,30 @@ def _is_forecast(item: dict) -> bool:
     return "forecast" in _s(item.get("po_forecast")).lower()
 
 
+def _is_empty_row(i: dict) -> bool:
+    """A row with NO identifying/demand content at all — no part (cust or
+    maini), no PO, no quantity, no ship date. Pure noise (e.g. a stray blank
+    line from extraction). A row missing ONLY the customer part but carrying a
+    PO / qty / date is still real demand and must NOT be treated as empty."""
+    qty = _s(i.get("open_qty"))
+    has_qty = qty not in ("", "0", "0.0", "0.00")
+    return not (
+        _s(i.get("cust_part_no")) or _s(i.get("maini_part_no"))
+        or _s(i.get("po_forecast")) or has_qty or _s(i.get("ship_date"))
+    )
+
+
 def firm_items(items: list[dict]) -> list[dict]:
-    """Only firm PO lines — forecast rows are auto-injected planning data and
-    are the SAME across every report for a customer, so including them in
-    version matching/diffs makes unrelated uploads look identical (over-eager
-    chaining) and floods the deltas with forecast churn. Versioning is about
-    the firm demand document, so we compare firm lines only."""
-    return [i for i in items if not _is_forecast(i)]
+    """Only firm demand lines. Excludes:
+      • forecast rows — auto-injected planning data, identical across every
+        report for a customer, so they cause over-eager chaining + delta churn.
+      • completely empty rows (no part, PO, qty, or date) — pure extraction
+        noise that would otherwise collapse to a blank identity and show up as
+        a spurious "+1 added" version on re-generation.
+    A row that only lacks the customer part (but has a PO / qty / date, or a
+    Maini part) is REAL demand and is kept — dropping it would hide demand.
+    Such rows are still stored in the ZSO regardless."""
+    return [i for i in items if not _is_forecast(i) and not _is_empty_row(i)]
 
 
 def part_set(items: list[dict]) -> set[str]:
