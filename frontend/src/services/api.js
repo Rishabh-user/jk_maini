@@ -46,6 +46,7 @@ export const updateUser = (id, data) => api.put(`/users/${id}`, data)
 // ─── Dashboard ───────────────────────────────
 export const fetchDashboardStats = () => api.get('/dashboard/stats')
 export const fetchRecentActivity = () => api.get('/dashboard/recent-activity')
+export const fetchDashboardCharts = () => api.get('/dashboard/charts')
 
 // ─── Emails ──────────────────────────────────
 export const fetchEmails = (skip = 0, limit = 50, status, includeManual = false) => {

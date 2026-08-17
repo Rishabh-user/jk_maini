@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Search, Paperclip, RefreshCw, Play, Trash2, Mail, CheckCircle2, Clock, FileText, PlugZap } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
 import { fetchEmails, fetchGmailEmails, fetchGmailStatus, gmailAuthorize, processEmail, deleteEmail } from '../services/api'
@@ -33,7 +34,13 @@ export default function EmailInbox() {
   const [emails, setEmails]       = useState([])
   const [counts, setCounts]       = useState({ all: 0, processed: 0, unprocessed: 0 })
   const [search, setSearch]       = useState('')
-  const [statusFilter, setStatusFilter] = useState('all')
+  // Lets the Dashboard's email chart link straight into the right tab
+  // (e.g. ?status=unprocessed) instead of always landing on "All".
+  const [searchParams] = useSearchParams()
+  const initialStatus = searchParams.get('status')
+  const [statusFilter, setStatusFilter] = useState(
+    STATUS_FILTERS.some((f) => f.key === initialStatus) ? initialStatus : 'all'
+  )
   const [loading, setLoading]     = useState(true)
   const [fetching, setFetching]   = useState(false)
   const [processing, setProcessing] = useState(null)

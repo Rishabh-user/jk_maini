@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { AgGridReact } from 'ag-grid-react'
 import { AllCommunityModule, ModuleRegistry, themeQuartz } from 'ag-grid-community'
 import { Package, Layers, Upload, Download, Filter, RefreshCw, CheckCircle2, AlertCircle, Loader2, Trash2 } from 'lucide-react'
@@ -16,7 +17,13 @@ const TABS = [
 ]
 
 export default function InventoryLiquidation() {
-  const [activeTab, setActiveTab] = useState('liquidation')
+  // Lets the Dashboard's inventory chart link straight into the right tab
+  // (e.g. ?tab=wip) instead of always landing on FG Liquidation.
+  const [searchParams] = useSearchParams()
+  const initialTab = searchParams.get('tab')
+  const [activeTab, setActiveTab] = useState(
+    TABS.some((t) => t.id === initialTab) ? initialTab : 'liquidation'
+  )
   const [summary, setSummary] = useState(null)
 
   useEffect(() => {

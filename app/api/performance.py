@@ -16,14 +16,10 @@ router = APIRouter(prefix="/performance", tags=["Performance Dashboard"])
 MONTHS = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"]
 
 
-@router.get("/demand-vs-actual")
-async def demand_vs_actual(
-    fiscal_year: str = Query("2025-26"),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Get monthly demand vs actual sales data."""
-    # Get demand from ZSO reports (aggregate by sales_month)
+async def get_demand_by_month(db: AsyncSession) -> tuple[dict[str, float], float]:
+    """Demand per fiscal month from ZSO report line items (sales_month field).
+    Not fiscal-year-scoped — ZSO items carry their own sales_month string and
+    there's no fiscal_year column on ZSOReport to filter by."""
     zso_result = await db.execute(select(ZSOReport.report_data))
     demand_by_month = {m: 0.0 for m in MONTHS}
     total_demand = 0.0
@@ -34,14 +30,17 @@ async def demand_vs_actual(
         for item in rd.get("items", []):
             month_str = item.get("sales_month", "")
             total_inr = float(item.get("total_inr", 0) or 0)
-            # Try to match month
             for m in MONTHS:
                 if month_str and m.lower() in month_str.lower():
                     demand_by_month[m] += total_inr
                     total_demand += total_inr
                     break
 
-    # Get actual sales data
+    return demand_by_month, total_demand
+
+
+async def get_actual_by_month(db: AsyncSession, fiscal_year: str) -> tuple[dict[str, float], float]:
+    """Actual sales per fiscal month for the given fiscal year (latest SalesData upload)."""
     sales_result = await db.execute(
         select(SalesData)
         .where(SalesData.fiscal_year == fiscal_year)
@@ -58,7 +57,40 @@ async def demand_vs_actual(
             actual_by_month[m] = val
             total_actual += val
 
-    # Compute variance
+    return actual_by_month, total_actual
+
+
+async def get_budget_by_month(db: AsyncSession, fiscal_year: str) -> tuple[dict[str, float], float]:
+    """Budget per fiscal month for the given fiscal year (latest BudgetData upload)."""
+    budget_result = await db.execute(
+        select(BudgetData)
+        .where(BudgetData.fiscal_year == fiscal_year)
+        .order_by(BudgetData.created_at.desc())
+        .limit(1)
+    )
+    budget = budget_result.scalar_one_or_none()
+    budget_by_month = {m: 0.0 for m in MONTHS}
+    total_budget = 0.0
+
+    if budget and budget.monthly_data:
+        for m in MONTHS:
+            val = float(budget.monthly_data.get(m, 0) or 0)
+            budget_by_month[m] = val
+            total_budget += val
+
+    return budget_by_month, total_budget
+
+
+@router.get("/demand-vs-actual")
+async def demand_vs_actual(
+    fiscal_year: str = Query("2025-26"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get monthly demand vs actual sales data."""
+    demand_by_month, total_demand = await get_demand_by_month(db)
+    actual_by_month, total_actual = await get_actual_by_month(db, fiscal_year)
+
     monthly = []
     for m in MONTHS:
         d = demand_by_month[m]
@@ -212,39 +244,8 @@ async def budget_vs_actual(
     current_user: User = Depends(get_current_user),
 ):
     """Get budget vs actual performance data."""
-    # Get budget
-    budget_result = await db.execute(
-        select(BudgetData)
-        .where(BudgetData.fiscal_year == fiscal_year)
-        .order_by(BudgetData.created_at.desc())
-        .limit(1)
-    )
-    budget = budget_result.scalar_one_or_none()
-    budget_by_month = {m: 0.0 for m in MONTHS}
-    total_budget = 0.0
-
-    if budget and budget.monthly_data:
-        for m in MONTHS:
-            val = float(budget.monthly_data.get(m, 0) or 0)
-            budget_by_month[m] = val
-            total_budget += val
-
-    # Get actual sales
-    sales_result = await db.execute(
-        select(SalesData)
-        .where(SalesData.fiscal_year == fiscal_year)
-        .order_by(SalesData.created_at.desc())
-        .limit(1)
-    )
-    sales = sales_result.scalar_one_or_none()
-    actual_by_month = {m: 0.0 for m in MONTHS}
-    total_actual = 0.0
-
-    if sales and sales.monthly_data:
-        for m in MONTHS:
-            val = float(sales.monthly_data.get(m, 0) or 0)
-            actual_by_month[m] = val
-            total_actual += val
+    budget_by_month, total_budget = await get_budget_by_month(db, fiscal_year)
+    actual_by_month, total_actual = await get_actual_by_month(db, fiscal_year)
 
     monthly = []
     for m in MONTHS:
