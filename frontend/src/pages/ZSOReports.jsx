@@ -73,11 +73,18 @@ const buildEmailIndex = (emails) =>
   emails.reduce((idx, e) => { idx[e.id] = { subject: e.subject || '', sender: e.sender || '', attachments: e.attachments || [] }; return idx }, {})
 
 const getReportFileNames = (r, ei) => ((ei[r?.email_id] || {}).attachments || []).map(a => a.filename).filter(Boolean)
-const getReportFileLabel = (r, ei) => getReportFileNames(r, ei)[0] || (ei[r?.email_id] || {}).subject || `Report #${r.id}`
+// Data-bearing filename only (skip images/logos/signatures + the html body),
+// so a multi-attachment email isn't labelled by its logo (e.g. "image.png").
+const IMG_HTML_RE = /\.(png|jpe?g|gif|webp|bmp|tiff?|svg|html?)$/i
+const getReportDataFileNames = (r, ei) => getReportFileNames(r, ei).filter((f) => !IMG_HTML_RE.test(f))
+// Prefer the email subject (most meaningful for multi-attachment emails), then
+// a real data file name, then the report id.
+const getReportFileLabel = (r, ei) =>
+  (ei[r?.email_id] || {}).subject || getReportDataFileNames(r, ei)[0] || getReportFileNames(r, ei)[0] || `Report #${r.id}`
 const getReportFileMeta = (r, ei) => {
-  const fns = getReportFileNames(r, ei)
-  if (fns.length > 1) return `+${fns.length - 1} more`
-  return (ei[r?.email_id] || {}).subject || `Report #${r.id}`
+  const fns = getReportDataFileNames(r, ei)
+  if (fns.length > 1) return `${fns.length} files`
+  return (ei[r?.email_id] || {}).subject || fns[0] || `Report #${r.id}`
 }
 
 const flattenReportRows = (report, emailIndex) =>

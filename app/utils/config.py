@@ -23,14 +23,21 @@ class Settings(BaseSettings):
     # local runs can exercise the identical code path.
     GMAIL_TOKEN_B64: str = ""
 
-    # Claude AI
+    # ── AI provider selection ──────────────────────────────────────────────
+    # All AI calls (extraction + column mapping) route through app/services/llm.py,
+    # which reads AI_PROVIDER and uses the matching key + models below. Switch
+    # provider with a single env var; no code change needed.
+    AI_PROVIDER: str = "openai"          # "openai" | "anthropic"
+
+    # OpenAI
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-4o-mini"            # cheap, structured column mapping
+    OPENAI_EXTRACTION_MODEL: str = "gpt-4o"      # vision-capable — email/PDF/image extraction
+
+    # Anthropic (Claude) — still selectable via AI_PROVIDER=anthropic
     ANTHROPIC_API_KEY: str = ""
-    # Model for column mapping (cheap, structured). Default = the one this app ships with.
-    AI_MODEL: str = "claude-sonnet-4-20250514"
-    # Model for AI-fallback extraction (email bodies, embedded tables, images, scanned PDFs).
-    # Defaults to the same proven model; set to a stronger model (e.g. claude-opus-4-8)
-    # in .env if your API key has access and you want maximum extraction accuracy.
-    EXTRACTION_MODEL: str = "claude-sonnet-4-20250514"
+    AI_MODEL: str = "claude-sonnet-4-20250514"          # column mapping
+    EXTRACTION_MODEL: str = "claude-sonnet-4-20250514"  # AI-fallback extraction
 
     # Tesseract
     TESSERACT_CMD: str = "tesseract"
@@ -91,10 +98,13 @@ def _assert_production_safety(s: Settings) -> None:
             "requests against wildcard origins. Set CORS_ORIGINS to your "
             "deployed frontend URL(s), comma-separated."
         )
-    if not s.ANTHROPIC_API_KEY:
+    _provider = (s.AI_PROVIDER or "openai").strip().lower()
+    _active_key = s.OPENAI_API_KEY if _provider == "openai" else s.ANTHROPIC_API_KEY
+    if not _active_key:
         problems.append(
-            "ANTHROPIC_API_KEY is empty — AI column mapping and AI-fallback "
-            "extraction will silently fall back to keyword heuristics."
+            f"AI_PROVIDER={_provider!r} but its API key is empty — AI column mapping "
+            "and AI-fallback extraction will silently fall back to keyword heuristics. "
+            f"Set {'OPENAI_API_KEY' if _provider == 'openai' else 'ANTHROPIC_API_KEY'}."
         )
 
     if problems:

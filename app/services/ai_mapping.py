@@ -315,11 +315,10 @@ async def map_columns_with_ai(source_columns: list[str]) -> dict[str, str]:
     if not source_columns:
         return {}
 
-    if not settings.ANTHROPIC_API_KEY:
-        logger.warning("ANTHROPIC_API_KEY not set, falling back to basic mapping")
+    from app.services import llm
+    if not llm.ai_enabled():
+        logger.warning("No AI key for active provider, falling back to basic mapping")
         return _fallback_mapping(source_columns)
-
-    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
     prompt = MAPPING_PROMPT_TEMPLATE.format(
         source_columns=json.dumps(source_columns),
@@ -327,13 +326,8 @@ async def map_columns_with_ai(source_columns: list[str]) -> dict[str, str]:
     )
 
     try:
-        message = client.messages.create(
-            model=settings.AI_MODEL,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        response_text = message.content[0].text.strip()
+        response_text = await llm.complete_json(prompt, kind="map", max_tokens=1024)
+        response_text = (response_text or "").strip()
 
         # Extract JSON from response (handle markdown code blocks)
         if "```" in response_text:

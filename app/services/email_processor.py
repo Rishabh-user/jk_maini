@@ -283,6 +283,13 @@ async def process_email(db: AsyncSession, email_id: int) -> dict:
                     extracted, filename=attachment.filename, file_path=attachment.file_path
                 )
 
+                # Skip decorative images (email logos / signature graphics) that
+                # yield no data — they only clutter the Raw Data viewer and logs.
+                # Data-bearing images (screenshots with tables → rows > 0) are kept.
+                if _get_source_type(attachment.filename) == "image" and not extracted.get("rows"):
+                    logger.info(f"Skipped empty image attachment (no extractable data): {attachment.filename}")
+                    continue
+
                 columns = extracted.get("columns", [])
 
                 # 3. Column mapping → canonical schema (identity-ish for AI rows)

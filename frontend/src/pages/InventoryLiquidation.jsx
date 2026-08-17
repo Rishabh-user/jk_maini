@@ -158,6 +158,17 @@ function GridPager({ total, page, pageSize, onPage, onPageSize }) {
 
 const gridDefaultColDef = { sortable: true, resizable: true, cellStyle: { color: '#374151', fontSize: '13px', display: 'flex', alignItems: 'center' } }
 
+// VMI / Safety status pill renderers (used as AG Grid cellRenderers)
+const VMI_STYLE = { below_min: 'bg-red-100 text-red-700', in_band: 'bg-green-100 text-green-700', above_max: 'bg-blue-100 text-blue-700' }
+const VMI_LABEL = { below_min: 'Below Min', in_band: 'In Band', above_max: 'Above Max' }
+function VmiStatusBadge({ value }) {
+  return <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${VMI_STYLE[value] || 'bg-gray-100 text-gray-600'}`}>{VMI_LABEL[value] || value}</span>
+}
+function SafetyStatusBadge({ value }) {
+  const short = value === 'short'
+  return <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${short ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{short ? 'Short' : 'Met'}</span>
+}
+
 function FGLiquidation() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -345,22 +356,26 @@ function FGLiquidation() {
           <span className="text-xs text-gray-400 ml-auto">PO demand drives status · Forecast is informational</span>
         </div>
 
-        {filtered.length > PAGE_SIZE && (
+        {filtered.length > 0 && (
           <div className="flex items-center justify-between mt-4 text-sm">
             <span className="text-gray-500">
-              Showing {(pageSafe - 1) * PAGE_SIZE + 1}–{Math.min(pageSafe * PAGE_SIZE, filtered.length)} of {filtered.length}
+              {filtered.length > PAGE_SIZE
+                ? `Showing ${(pageSafe - 1) * PAGE_SIZE + 1}–${Math.min(pageSafe * PAGE_SIZE, filtered.length)} of ${filtered.length} parts`
+                : `${filtered.length} part${filtered.length > 1 ? 's' : ''}`}
             </span>
-            <div className="flex items-center gap-1">
-              <button onClick={() => setPage(1)} disabled={pageSafe === 1}
-                className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">« First</button>
-              <button onClick={() => setPage(pageSafe - 1)} disabled={pageSafe === 1}
-                className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">‹ Prev</button>
-              <span className="px-2 text-gray-600">Page {pageSafe} / {pageCount}</span>
-              <button onClick={() => setPage(pageSafe + 1)} disabled={pageSafe === pageCount}
-                className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">Next ›</button>
-              <button onClick={() => setPage(pageCount)} disabled={pageSafe === pageCount}
-                className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">Last »</button>
-            </div>
+            {filtered.length > PAGE_SIZE && (
+              <div className="flex items-center gap-1">
+                <button onClick={() => setPage(1)} disabled={pageSafe === 1}
+                  className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">« First</button>
+                <button onClick={() => setPage(pageSafe - 1)} disabled={pageSafe === 1}
+                  className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">‹ Prev</button>
+                <span className="px-2 text-gray-600">Page {pageSafe} / {pageCount}</span>
+                <button onClick={() => setPage(pageSafe + 1)} disabled={pageSafe === pageCount}
+                  className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">Next ›</button>
+                <button onClick={() => setPage(pageCount)} disabled={pageSafe === pageCount}
+                  className="px-2 py-1 border border-gray-200 rounded disabled:opacity-40">Last »</button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -389,8 +404,28 @@ function VmiSafety() {
 
   const vmi = data?.vmi || {}
   const safety = data?.safety || {}
-  const VMI_STYLE = { below_min: 'bg-red-100 text-red-700', in_band: 'bg-green-100 text-green-700', above_max: 'bg-blue-100 text-blue-700' }
-  const VMI_LABEL = { below_min: 'Below Min', in_band: 'In Band', above_max: 'Above Max' }
+
+  const vmiCols = useMemo(() => [
+    { field: 'maini_part_no', headerName: 'Maini Part #', minWidth: 150 },
+    { field: 'cust_part_no', headerName: 'Cust Part #', minWidth: 130 },
+    { field: 'min_qty', headerName: 'Min', type: 'numericColumn', minWidth: 90, valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'max_qty', headerName: 'Max', type: 'numericColumn', minWidth: 90, valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'fg_qty', headerName: 'FG On Hand', type: 'numericColumn', minWidth: 120, valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'replenish_to_max', headerName: 'Replenish to Max', type: 'numericColumn', minWidth: 150, valueFormatter: (p) => (p.value > 0 ? fmtNum(p.value) : '—'), cellClass: 'text-red-600' },
+    { field: 'status', headerName: 'Status', minWidth: 120, cellRenderer: VmiStatusBadge },
+  ], [])
+
+  const safetyCols = useMemo(() => [
+    { field: 'maini_part_no', headerName: 'Maini Part #', minWidth: 150 },
+    { field: 'cust_part_no', headerName: 'Cust Part #', minWidth: 130 },
+    { field: 'customer', headerName: 'Customer', minWidth: 150 },
+    { field: 'kas', headerName: 'KAS', minWidth: 120 },
+    { field: 'site', headerName: 'Site', minWidth: 120 },
+    { field: 'safety_qty', headerName: 'Safety Qty', type: 'numericColumn', minWidth: 120, valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'fg_qty', headerName: 'FG On Hand', type: 'numericColumn', minWidth: 120, valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'shortfall', headerName: 'Shortfall', type: 'numericColumn', minWidth: 120, valueFormatter: (p) => (p.value > 0 ? fmtNum(p.value) : '—'), cellClass: 'text-red-600' },
+    { field: 'status', headerName: 'Status', minWidth: 100, cellRenderer: SafetyStatusBadge },
+  ], [])
 
   return (
     <div className="space-y-6">
@@ -420,29 +455,17 @@ function VmiSafety() {
             {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} Refresh
           </button>
         </div>
-        <div className="border border-gray-200 rounded-lg overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead><tr className="bg-gray-50 border-b border-gray-200">
-              {['Maini Part #', 'Cust Part #', 'Min', 'Max', 'FG On Hand', 'Replenish to Max', 'Status'].map((h) => (
-                <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-3 py-3 whitespace-nowrap">{h}</th>
-              ))}
-            </tr></thead>
-            <tbody>
-              {(vmi.rows || []).length > 0 ? vmi.rows.map((r, i) => (
-                <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
-                  <td className="px-3 py-2 font-medium">{r.maini_part_no}</td>
-                  <td className="px-3 py-2">{r.cust_part_no || '—'}</td>
-                  <td className="px-3 py-2 text-right">{fmtNum(r.min_qty)}</td>
-                  <td className="px-3 py-2 text-right">{fmtNum(r.max_qty)}</td>
-                  <td className="px-3 py-2 text-right font-medium">{fmtNum(r.fg_qty)}</td>
-                  <td className="px-3 py-2 text-right text-red-600">{r.replenish_to_max > 0 ? fmtNum(r.replenish_to_max) : '—'}</td>
-                  <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${VMI_STYLE[r.status]}`}>{VMI_LABEL[r.status]}</span></td>
-                </tr>
-              )) : (
-                <tr><td colSpan={7} className="px-6 py-8 text-center text-sm text-gray-500">Upload a VMI file to see the Min/Max replenishment view.</td></tr>
-              )}
-            </tbody>
-          </table>
+        <div className="bg-white border border-gray-200 rounded-lg" style={{ height: 380 }}>
+          <AgGridReact
+            theme={themeQuartz}
+            rowData={vmi.rows || []}
+            columnDefs={vmiCols}
+            defaultColDef={gridDefaultColDef}
+            rowHeight={38} headerHeight={38}
+            pagination={true} paginationPageSize={25} paginationPageSizeSelector={[25, 50, 100]}
+            enableCellTextSelection={true} suppressRowClickSelection={true} animateRows={true}
+            overlayNoRowsTemplate='<span style="padding:12px;color:#6b7280;font-size:13px;">Upload a VMI file (Demand Management) to see the Min/Max replenishment view.</span>'
+          />
         </div>
       </div>
 
@@ -469,36 +492,17 @@ function VmiSafety() {
           </div>
         )}
 
-        <div className="border border-gray-200 rounded-lg overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead><tr className="bg-gray-50 border-b border-gray-200">
-              {['Maini Part #', 'Cust Part #', 'Customer', 'KAS', 'Site', 'Safety Qty', 'FG On Hand', 'Shortfall', 'Status'].map((h) => (
-                <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-3 py-3 whitespace-nowrap">{h}</th>
-              ))}
-            </tr></thead>
-            <tbody>
-              {(safety.rows || []).length > 0 ? safety.rows.slice(0, 200).map((r, i) => (
-                <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
-                  <td className="px-3 py-2 font-medium">{r.maini_part_no}</td>
-                  <td className="px-3 py-2">{r.cust_part_no || '—'}</td>
-                  <td className="px-3 py-2 max-w-[140px] truncate" title={r.customer}>{r.customer}</td>
-                  <td className="px-3 py-2">{r.kas || '—'}</td>
-                  <td className="px-3 py-2">{r.site || '—'}</td>
-                  <td className="px-3 py-2 text-right">{fmtNum(r.safety_qty)}</td>
-                  <td className="px-3 py-2 text-right font-medium">{fmtNum(r.fg_qty)}</td>
-                  <td className="px-3 py-2 text-right text-red-600">{r.shortfall > 0 ? fmtNum(r.shortfall) : '—'}</td>
-                  <td className="px-3 py-2">
-                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${r.status === 'short' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
-                      {r.status === 'short' ? 'Short' : 'Met'}
-                    </span>
-                  </td>
-                </tr>
-              )) : (
-                <tr><td colSpan={9} className="px-6 py-8 text-center text-sm text-gray-500">Upload a Safety Stock file to see coverage vs safety levels.</td></tr>
-              )}
-            </tbody>
-          </table>
-          {(safety.rows || []).length > 200 && <p className="text-xs text-gray-400 p-2 text-center">Showing first 200 of {safety.rows.length} rows.</p>}
+        <div className="bg-white border border-gray-200 rounded-lg" style={{ height: 480 }}>
+          <AgGridReact
+            theme={themeQuartz}
+            rowData={safety.rows || []}
+            columnDefs={safetyCols}
+            defaultColDef={gridDefaultColDef}
+            rowHeight={38} headerHeight={38}
+            pagination={true} paginationPageSize={50} paginationPageSizeSelector={[25, 50, 100, 250]}
+            enableCellTextSelection={true} suppressRowClickSelection={true} animateRows={true}
+            overlayNoRowsTemplate='<span style="padding:12px;color:#6b7280;font-size:13px;">Upload a Safety Stock file (Demand Management) to see coverage vs safety levels.</span>'
+          />
         </div>
       </div>
     </div>

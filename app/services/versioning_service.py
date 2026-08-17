@@ -30,8 +30,39 @@ def _items(report_data: dict | None) -> list[dict]:
     return []
 
 
+def _is_forecast(item: dict) -> bool:
+    """A line is forecast (planning data) if its PO label contains 'forecast'."""
+    return "forecast" in _s(item.get("po_forecast")).lower()
+
+
+def _is_empty_row(i: dict) -> bool:
+    """A row with NO identifying/demand content at all — no part (cust or
+    maini), no PO, no quantity, no ship date. Pure noise (e.g. a stray blank
+    line from extraction). A row missing ONLY the customer part but carrying a
+    PO / qty / date is still real demand and must NOT be treated as empty."""
+    qty = _s(i.get("open_qty"))
+    has_qty = qty not in ("", "0", "0.0", "0.00")
+    return not (
+        _s(i.get("cust_part_no")) or _s(i.get("maini_part_no"))
+        or _s(i.get("po_forecast")) or has_qty or _s(i.get("ship_date"))
+    )
+
+
+def firm_items(items: list[dict]) -> list[dict]:
+    """Only firm demand lines. Excludes:
+      • forecast rows — auto-injected planning data, identical across every
+        report for a customer, so they cause over-eager chaining + delta churn.
+      • completely empty rows (no part, PO, qty, or date) — pure extraction
+        noise that would otherwise collapse to a blank identity and show up as
+        a spurious "+1 added" version on re-generation.
+    A row that only lacks the customer part (but has a PO / qty / date, or a
+    Maini part) is REAL demand and is kept — dropping it would hide demand.
+    Such rows are still stored in the ZSO regardless."""
+    return [i for i in items if not _is_forecast(i) and not _is_empty_row(i)]
+
+
 def part_set(items: list[dict]) -> set[str]:
-    return {_s(i.get("cust_part_no")).lower() for i in items if _s(i.get("cust_part_no"))}
+    return {_s(i.get("cust_part_no")).lower() for i in firm_items(items) if _s(i.get("cust_part_no"))}
 
 
 def document_class(items: list[dict]) -> str:
@@ -72,8 +103,10 @@ def diff_items(old_items: list[dict], new_items: list[dict]) -> dict:
     Returns added / removed / modified lists + unchanged count. `modified` entries
     carry per-field old→new changes.
     """
-    old_by = {_row_key(i): i for i in old_items}
-    new_by = {_row_key(i): i for i in new_items}
+    # Forecast rows are injected planning data (identical across reports) — they
+    # aren't part of the firm demand document, so exclude them from the diff.
+    old_by = {_row_key(i): i for i in firm_items(old_items)}
+    new_by = {_row_key(i): i for i in firm_items(new_items)}
 
     added, removed, modified = [], [], []
     unchanged = 0
@@ -107,7 +140,7 @@ def diff_items(old_items: list[dict], new_items: list[dict]) -> dict:
         "unchanged": unchanged,
         "has_changes": bool(added or removed or modified),
         "counts": {
-            "total": len(new_items),
+            "total": len(new_by),   # firm PO lines only (forecast excluded)
             "added": len(added), "removed": len(removed),
             "modified": len(modified), "unchanged": unchanged,
         },

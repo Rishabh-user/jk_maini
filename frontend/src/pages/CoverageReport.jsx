@@ -1,6 +1,26 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
+import { AgGridReact } from 'ag-grid-react'
+import { AllCommunityModule, ModuleRegistry, themeQuartz } from 'ag-grid-community'
 import { Shield, Download, Upload, RefreshCw, AlertTriangle, Share2, Loader2 } from 'lucide-react'
 import { generateCoverage, fetchCoverageReport, fetchCoverageExceptions } from '../services/api'
+
+ModuleRegistry.registerModules([AllCommunityModule])
+
+const LEVEL_STYLE = {
+  full: 'bg-green-100 text-green-700', partial: 'bg-yellow-100 text-yellow-700',
+  low: 'bg-orange-100 text-orange-700', none: 'bg-red-100 text-red-700',
+}
+const LEVEL_DOT = { full: 'bg-green-500', partial: 'bg-yellow-500', low: 'bg-orange-500', none: 'bg-red-500' }
+const LEVEL_LABEL = { full: 'Full', partial: 'Partial', low: 'Low', none: 'None' }
+function CovLevelBadge({ value }) {
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${LEVEL_STYLE[value] || 'bg-gray-100 text-gray-600'}`}>
+      <span className={`w-2 h-2 rounded-full ${LEVEL_DOT[value] || 'bg-gray-400'}`} />
+      {LEVEL_LABEL[value] || value}
+    </span>
+  )
+}
+const covGridDefaultColDef = { sortable: true, resizable: true, filter: true, cellStyle: { color: '#374151', fontSize: '13px' } }
 
 const COVERAGE_LEVELS = [
   { key: 'full', label: 'Full Coverage', color: 'bg-green-500', textColor: 'text-green-700', bgColor: 'bg-green-50', borderColor: 'border-green-200', desc: 'FG + WIP + RM covers demand' },
@@ -58,6 +78,43 @@ export default function CoverageReport() {
   const displayRows = viewMode === 'customer'
     ? [...rows].sort((a, b) => (a.customer || '').localeCompare(b.customer || ''))
     : [...rows].sort((a, b) => (a.maini_part_no || '').localeCompare(b.maini_part_no || ''))
+
+  const columnDefs = useMemo(() => {
+    const money = (p) => (p.value == null ? '—' : covMoney(p.value, p.data?.currency))
+    const num = (p) => covNum(p.value)
+    const idCols = viewMode === 'customer'
+      ? [
+          { field: 'customer', headerName: 'Customer', minWidth: 160 },
+          { field: 'cust_part_no', headerName: 'Cust Part #', minWidth: 140 },
+          { field: 'maini_part_no', headerName: 'Maini Part #', minWidth: 150 },
+        ]
+      : [
+          { field: 'maini_part_no', headerName: 'Maini Part #', minWidth: 150 },
+          { field: 'cust_part_no', headerName: 'Cust Part #', minWidth: 140 },
+          { field: 'customer', headerName: 'Customer', minWidth: 160 },
+        ]
+    const numCols = metric === 'qty'
+      ? [
+          { field: 'demand_qty', headerName: 'Demand Qty', type: 'numericColumn', minWidth: 120, valueFormatter: num },
+          { field: 'fg_stock', headerName: 'FG Stock', type: 'numericColumn', minWidth: 110, valueFormatter: num },
+          { field: 'wip', headerName: 'WIP', type: 'numericColumn', minWidth: 100, valueFormatter: num },
+          { field: 'rm_stock', headerName: 'RM Stock', type: 'numericColumn', minWidth: 110, valueFormatter: num, cellClass: 'text-gray-400', headerTooltip: 'Informational — not counted in coverage until BOM' },
+          { field: 'rm_in_transit', headerName: 'In-Transit', type: 'numericColumn', minWidth: 110, valueFormatter: num, cellClass: 'text-gray-400', headerTooltip: 'Informational — not counted in coverage until BOM' },
+          { field: 'total_coverage', headerName: 'Total Coverage', type: 'numericColumn', minWidth: 130, valueFormatter: num },
+          { field: 'gap', headerName: 'Gap', type: 'numericColumn', minWidth: 100, valueFormatter: (p) => (p.value > 0 ? covNum(p.value) : '—'), cellClass: 'text-red-600' },
+          { field: 'coverage_pct', headerName: 'Coverage %', type: 'numericColumn', minWidth: 120, valueFormatter: (p) => `${p.value}%` },
+          { field: 'level', headerName: 'Status', minWidth: 120, sortable: true, filter: true, cellRenderer: CovLevelBadge },
+        ]
+      : [
+          { field: 'unit_price', headerName: 'Unit Price', type: 'numericColumn', minWidth: 120, valueFormatter: money, cellClass: 'text-gray-500' },
+          { field: 'demand_value', headerName: 'Demand Value', type: 'numericColumn', minWidth: 140, valueFormatter: money },
+          { field: 'coverage_value', headerName: 'Coverage Value', type: 'numericColumn', minWidth: 150, valueFormatter: money },
+          { field: 'gap_value', headerName: 'Gap Value', type: 'numericColumn', minWidth: 130, valueFormatter: (p) => (p.value > 0 ? covMoney(p.value, p.data?.currency) : '—'), cellClass: 'text-red-600' },
+          { field: 'coverage_pct', headerName: 'Coverage %', type: 'numericColumn', minWidth: 120, valueFormatter: (p) => `${p.value}%` },
+          { field: 'level', headerName: 'Status', minWidth: 120, sortable: true, filter: true, cellRenderer: CovLevelBadge },
+        ]
+    return [...idCols, ...numCols]
+  }, [viewMode, metric])
 
   return (
     <div>
@@ -123,82 +180,24 @@ export default function CoverageReport() {
 
       {error && <div className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">{error}</div>}
 
-      {/* Coverage Table */}
-      {(() => {
-        const idCols = viewMode === 'customer' ? ['Customer', 'Cust Part #', 'Maini Part #'] : ['Maini Part #', 'Cust Part #', 'Customer']
-        const numCols = metric === 'qty'
-          ? ['Demand Qty', 'FG Stock', 'WIP', 'RM Stock', 'In-Transit', 'Total Coverage', 'Gap', 'Coverage %', 'Status']
-          : ['Unit Price', 'Demand Value', 'Coverage Value', 'Gap Value', 'Coverage %', 'Status']
-        const headers = [...idCols, ...numCols]
-        const badge = (lvl) => {
-          const c = lvl === 'full' ? 'bg-green-100 text-green-700' : lvl === 'partial' ? 'bg-yellow-100 text-yellow-700' : lvl === 'low' ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-700'
-          const d = lvl === 'full' ? 'bg-green-500' : lvl === 'partial' ? 'bg-yellow-500' : lvl === 'low' ? 'bg-orange-500' : 'bg-red-500'
-          const lbl = lvl === 'full' ? 'Full' : lvl === 'partial' ? 'Partial' : lvl === 'low' ? 'Low' : 'None'
-          return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${c}`}><div className={`w-2 h-2 rounded-full ${d}`} />{lbl}</span>
-        }
-        return (
-          <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="bg-gray-50 border-b border-gray-200">
-                  {headers.map((h) => <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase px-4 py-3 whitespace-nowrap">{h}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {displayRows.length > 0 ? displayRows.map((row, i) => (
-                  <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
-                    {viewMode === 'customer' ? (
-                      <>
-                        <td className="px-4 py-2 text-sm max-w-[160px] truncate" title={row.customer}>{row.customer}</td>
-                        <td className="px-4 py-2 text-sm">{row.cust_part_no}</td>
-                        <td className="px-4 py-2 text-sm font-medium">{row.maini_part_no}</td>
-                      </>
-                    ) : (
-                      <>
-                        <td className="px-4 py-2 text-sm font-medium">{row.maini_part_no}</td>
-                        <td className="px-4 py-2 text-sm">{row.cust_part_no}</td>
-                        <td className="px-4 py-2 text-sm max-w-[160px] truncate" title={row.customer}>{row.customer}</td>
-                      </>
-                    )}
-                    {metric === 'qty' ? (
-                      <>
-                        <td className="px-4 py-2 text-sm">{covNum(row.demand_qty)}</td>
-                        <td className="px-4 py-2 text-sm">{covNum(row.fg_stock)}</td>
-                        <td className="px-4 py-2 text-sm">{covNum(row.wip)}</td>
-                        <td className="px-4 py-2 text-sm text-gray-400" title="Informational — not counted in coverage until BOM">{covNum(row.rm_stock)}</td>
-                        <td className="px-4 py-2 text-sm text-gray-400" title="Informational — not counted in coverage until BOM">{covNum(row.rm_in_transit)}</td>
-                        <td className="px-4 py-2 text-sm font-medium">{covNum(row.total_coverage)}</td>
-                        <td className="px-4 py-2 text-sm text-red-600">{row.gap > 0 ? covNum(row.gap) : '—'}</td>
-                        <td className="px-4 py-2 text-sm font-medium">{row.coverage_pct}%</td>
-                        <td className="px-4 py-2">{badge(row.level)}</td>
-                      </>
-                    ) : (
-                      <>
-                        <td className="px-4 py-2 text-sm text-gray-500">{row.unit_price == null ? '—' : covMoney(row.unit_price, row.currency)}</td>
-                        <td className="px-4 py-2 text-sm">{covMoney(row.demand_value, row.currency)}</td>
-                        <td className="px-4 py-2 text-sm font-medium">{covMoney(row.coverage_value, row.currency)}</td>
-                        <td className="px-4 py-2 text-sm text-red-600">{row.gap_value > 0 ? covMoney(row.gap_value, row.currency) : '—'}</td>
-                        <td className="px-4 py-2 text-sm font-medium">{row.coverage_pct}%</td>
-                        <td className="px-4 py-2">{badge(row.level)}</td>
-                      </>
-                    )}
-                  </tr>
-                )) : (
-                  <tr>
-                    <td colSpan={headers.length} className="px-6 py-12 text-center">
-                      <Shield size={40} className="mx-auto text-gray-300 mb-3" />
-                      <p className="text-sm font-medium text-gray-500">No coverage data generated yet</p>
-                      <p className="text-xs text-gray-400 mt-1">
-                        Upload stock and have a ZSO report, then click "Generate Coverage".
-                      </p>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        )
-      })()}
+      {/* Coverage Table — AG Grid (client-side, paginated + virtualized) */}
+      <div className="bg-white border border-gray-200 rounded-xl" style={{ height: 560 }}>
+        <AgGridReact
+          theme={themeQuartz}
+          rowData={displayRows}
+          columnDefs={columnDefs}
+          defaultColDef={covGridDefaultColDef}
+          rowHeight={40}
+          headerHeight={38}
+          pagination={true}
+          paginationPageSize={50}
+          paginationPageSizeSelector={[25, 50, 100, 250]}
+          enableCellTextSelection={true}
+          suppressRowClickSelection={true}
+          animateRows={true}
+          overlayNoRowsTemplate='<span style="padding:12px;color:#6b7280;font-size:13px;">No coverage data yet — upload stock, have a ZSO report, then click &quot;Generate Coverage&quot;.</span>'
+        />
+      </div>
 
       {/* Exception Report Section */}
       <div className="mt-6 bg-white rounded-xl border border-gray-200 p-6">
