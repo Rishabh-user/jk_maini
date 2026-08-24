@@ -125,18 +125,44 @@ def _apply_location_gate(category: str, location: str) -> str:
     return category
 
 
+def _excluded(row: dict, reason: str, part: str = "", mtype: str = "") -> dict:
+    """Build an 'excluded' marker for a row we deliberately don't count.
+
+    Exclusion RULES ARE UNCHANGED — scrap / rework / non-valuated / no-part rows
+    never enter any inventory calculation. We just record WHY, so the UI can
+    reconcile "file rows = included + excluded" and let you inspect them for
+    validation/troubleshooting.
+    """
+    return {
+        "part": part, "category": "excluded", "excluded_reason": reason,
+        "plant": _first(row, "Plant", "plant"),
+        "plant_group": plant_group(_first(row, "Plant", "plant")),
+        "location": _first(row, "Storage Location", "storage_location", "Descr. of Storage Loc."),
+        "material_type": mtype,
+        "qty": _num(_first(row, "Unrestricted", "unrestricted", "Open Qty", "Qty", "Stock", "Quantity")),
+        "in_transit": _num(_first(row, "Stock in Transit", "stock_in_transit")),
+    }
+
+
 def classify_row(row: dict) -> dict | None:
-    """Classify one raw stock/open-order row. Returns an annotated dict, or None
-    to drop the row (scrap / unusable)."""
+    """Classify one raw stock/open-order row.
+
+    Returns an annotated dict. Rows that must not affect inventory get
+    category 'excluded' + an 'excluded_reason' (they are filtered out of every
+    total/report downstream, but stay visible for audit). Returns None only for
+    a completely unusable row.
+    """
     part = _first(row, "Material", "Maini Part No", "maini_part_no", "Part No", "part_no")
     if not part:
-        return None
+        return _excluded(row, "No part number")
 
     order_type = _first(row, "Order Type", "order_type")
     # ── Open-orders (production) file → WIP ──────────────────────────────
     if order_type or ("Open Qty" in row and "Material Type" not in row):
         if order_type and order_type.upper() not in _WIP_ORDER_TYPES:
-            return None  # rework / non-production order
+            # Rework / non-production order — fixing existing parts, not new
+            # stock; counting it would double-count the same physical units.
+            return _excluded(row, f"Rework / non-production order ({order_type.upper()})", part, "OPEN_ORDER")
         qty = _num(_first(row, "Open Qty", "open_qty", "Qty", "Quantity"))
         return {
             "part": part, "category": "wip",
@@ -152,7 +178,11 @@ def classify_row(row: dict) -> dict | None:
     location = _first(row, "Storage Location", "storage_location", "Descr. of Storage Loc.")
     category = _category_from_type(mtype)
     if category == "scrap":
-        return None
+        return _excluded(row, f"Scrap ({mtype.upper()})", part, mtype)
+    if category == "other":
+        # Non-valuated / unrecognised material type (e.g. UNBW = free-issue or
+        # customer-supplied tooling with no inventory value — not Maini's to sell).
+        return _excluded(row, f"Non-valuated / not inventory ({mtype.upper() or 'no type'})", part, mtype)
     category = _apply_location_gate(category, location)
     return {
         "part": part, "category": category,
@@ -169,12 +199,18 @@ def classify_rows(rows: list[dict]) -> tuple[list[dict], dict]:
     """Classify all rows. Returns (annotated_rows, summary).
 
     Each annotated row keeps its original fields plus _category / _plant_group /
-    _part / _qty / _in_transit. Summary aggregates qty + distinct parts by
-    category and by plant group.
+    _part / _qty / _in_transit (and _excluded_reason for excluded rows).
+
+    Excluded rows (scrap / rework / non-valuated / no-part) ARE returned so they
+    can be inspected for validation, but they are NOT counted in by_category /
+    by_group totals — inventory maths is unchanged. `summary.reconciliation`
+    gives file rows = included + excluded, with a per-reason breakdown.
     """
     annotated: list[dict] = []
     by_cat: dict[str, dict] = {}
     by_group: dict[str, dict] = {}
+    included = 0
+    excluded_by_reason: dict[str, int] = {}
 
     for row in rows:
         try:
@@ -189,7 +225,15 @@ def classify_rows(rows: list[dict]) -> tuple[list[dict], dict]:
             "_plant_group": c["plant_group"], "_plant": c["plant"],
             "_location": c["location"], "_qty": c["qty"], "_in_transit": c["in_transit"],
         })
+        if c["category"] == "excluded":
+            reason = c.get("excluded_reason") or "Excluded"
+            ann["_excluded_reason"] = reason
+            excluded_by_reason[reason] = excluded_by_reason.get(reason, 0) + 1
+            annotated.append(ann)
+            continue   # never counted in any total
+
         annotated.append(ann)
+        included += 1
 
         cat, grp = c["category"], c["plant_group"]
         by_cat.setdefault(cat, {"parts": set(), "qty": 0.0, "in_transit": 0.0})
@@ -201,7 +245,13 @@ def classify_rows(rows: list[dict]) -> tuple[list[dict], dict]:
         "by_category": {k: {"parts": len(v["parts"]), "qty": round(v["qty"], 2),
                             "in_transit": round(v["in_transit"], 2)} for k, v in by_cat.items()},
         "by_group": {k: {"parts": len(v["parts"]), "qty": round(v["qty"], 2)} for k, v in by_group.items()},
-        "total_rows": len(annotated),
+        "total_rows": included,               # counted rows (unchanged meaning)
+        "reconciliation": {
+            "file_rows": len(rows),
+            "included_rows": included,
+            "excluded_rows": sum(excluded_by_reason.values()),
+            "excluded_by_reason": dict(sorted(excluded_by_reason.items(), key=lambda kv: -kv[1])),
+        },
     }
     return annotated, summary
 

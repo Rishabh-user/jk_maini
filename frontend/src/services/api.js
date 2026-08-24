@@ -176,6 +176,8 @@ export const fetchFgLiquidation = (zsoReportId, scope = 'report') => {
   if (zsoReportId) params.zso_report_id = zsoReportId
   return api.get('/inventory/fg-liquidation', { params })
 }
+export const fetchStockUploads = () => api.get('/inventory/stock/uploads')
+export const fetchStockRows = (params = {}) => api.get('/inventory/stock/rows', { params })
 export const fetchVmiSafety = () => api.get('/inventory/vmi-safety')
 export const fetchAllocations = () => api.get('/inventory/allocations')
 // Both endpoints return only `limit` allocation rows per call (server-side

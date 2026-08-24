@@ -1,24 +1,27 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { AgGridReact } from 'ag-grid-react'
 import { AllCommunityModule, ModuleRegistry, themeQuartz } from 'ag-grid-community'
-import { Package, Layers, Upload, Download, Filter, RefreshCw, CheckCircle2, AlertCircle, Loader2, Trash2 } from 'lucide-react'
-import { fetchInventorySummary, uploadStockFile, runAllocation, fetchAllocations, fetchAllocationDetail, fetchLatestAllocation, deleteStock, deleteAllocations, fetchFgLiquidation, fetchVmiSafety } from '../services/api'
+import { Package, Layers, Upload, Download, RefreshCw, CheckCircle2, AlertCircle, Loader2, Trash2 } from 'lucide-react'
+import { fetchInventorySummary, uploadStockFile, deleteStock, fetchFgLiquidation, fetchVmiSafety, fetchStockUploads, fetchStockRows } from '../services/api'
 import { useDialog } from '../components/DialogProvider'
 
 ModuleRegistry.registerModules([AllCommunityModule])
 
+// Legacy "FG Allocation / WIP Allocation / Liquidation Reports" tabs were
+// retired — FG Liquidation + the Coverage Report supersede them (same
+// demand-vs-stock analysis, no "Run Allocation" step). Stock upload became the
+// "Stock Data" tab: upload + a full grid to inspect/validate what was ingested.
 const TABS = [
   { id: 'liquidation', label: 'FG Liquidation' },
+  { id: 'stock', label: 'Stock Data' },
   { id: 'vmi', label: 'VMI & Safety Stock' },
-  { id: 'fg', label: 'FG Allocation' },
-  { id: 'wip', label: 'WIP Allocation' },
-  { id: 'reports', label: 'Liquidation Reports' },
 ]
 
 export default function InventoryLiquidation() {
-  // Lets the Dashboard's inventory chart link straight into the right tab
-  // (e.g. ?tab=wip) instead of always landing on FG Liquidation.
+  // Lets other pages link straight into a tab (e.g. ?tab=stock) instead of
+  // always landing on FG Liquidation. Unknown values fall back to 'liquidation',
+  // so old links to the retired allocation tabs degrade gracefully.
   const [searchParams] = useSearchParams()
   const initialTab = searchParams.get('tab')
   const [activeTab, setActiveTab] = useState(
@@ -82,10 +85,8 @@ export default function InventoryLiquidation() {
       </div>
 
       {activeTab === 'liquidation' && <FGLiquidation />}
+      {activeTab === 'stock' && <StockUpload onRefresh={loadSummary} />}
       {activeTab === 'vmi' && <VmiSafety />}
-      {activeTab === 'fg' && <FGAllocation onRefresh={loadSummary} />}
-      {activeTab === 'wip' && <WIPAllocation onRefresh={loadSummary} />}
-      {activeTab === 'reports' && <LiquidationReports />}
     </div>
   )
 }
@@ -116,54 +117,10 @@ const fmtMonth = (m) => {
 
 const PAGE_SIZE = 50
 
-// Shared status pill for allocation rows (FG / WIP / Liquidation Reports) —
-// same three states everywhere: full / partial / no_stock.
-const ALLOC_STATUS_STYLE = { full: 'bg-green-100 text-green-700', partial: 'bg-yellow-100 text-yellow-700', no_stock: 'bg-red-100 text-red-700' }
-const ALLOC_STATUS_DOT = { full: 'bg-green-500', partial: 'bg-yellow-500', no_stock: 'bg-red-500' }
-const ALLOC_STATUS_LABEL = { full: 'Full', partial: 'Partial', no_stock: 'No Stock' }
-function AllocStatusBadge({ status }) {
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${ALLOC_STATUS_STYLE[status] || 'bg-gray-100 text-gray-600'}`}>
-      <span className={`w-2 h-2 rounded-full ${ALLOC_STATUS_DOT[status] || 'bg-gray-400'}`} />
-      {ALLOC_STATUS_LABEL[status] || status || '—'}
-    </span>
-  )
-}
-
-// Server-side pagination footer shared by FG Allocation / WIP Allocation /
-// Liquidation Reports — same UI + math as the Master Data page's footer.
-function GridPager({ total, page, pageSize, onPage, onPageSize }) {
-  const totalPages = Math.max(1, Math.ceil(total / pageSize))
-  const pageSafe = Math.min(page, totalPages)
-  if (total === 0) return null
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3 mt-3 text-sm text-gray-600">
-      <div className="flex items-center gap-2">
-        <span>Rows per page:</span>
-        <select value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))}
-          className="border border-gray-200 rounded-md px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-          {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}</option>)}
-        </select>
-        <span className="text-gray-400">
-          {(pageSafe - 1) * pageSize + 1}–{Math.min(pageSafe * pageSize, total)} of {total}
-        </span>
-      </div>
-      <div className="flex items-center gap-2">
-        <button onClick={() => onPage(1)} disabled={pageSafe <= 1}
-          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">« First</button>
-        <button onClick={() => onPage(pageSafe - 1)} disabled={pageSafe <= 1}
-          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">‹ Prev</button>
-        <span className="px-2">Page {pageSafe} of {totalPages}</span>
-        <button onClick={() => onPage(pageSafe + 1)} disabled={pageSafe >= totalPages}
-          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">Next ›</button>
-        <button onClick={() => onPage(totalPages)} disabled={pageSafe >= totalPages}
-          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">Last »</button>
-      </div>
-    </div>
-  )
-}
-
-const gridDefaultColDef = { sortable: true, resizable: true, cellStyle: { color: '#374151', fontSize: '13px', display: 'flex', alignItems: 'center' } }
+// No display:flex here — it disables AG Grid's built-in cell clipping and lets
+// long values (e.g. Description) bleed into the next column. The native cell
+// already clips with an ellipsis and vertically centres text.
+const gridDefaultColDef = { sortable: true, resizable: true, cellStyle: { color: '#374151', fontSize: '13px' } }
 
 // VMI / Safety status pill renderers (used as AG Grid cellRenderers)
 const VMI_STYLE = { below_min: 'bg-red-100 text-red-700', in_band: 'bg-green-100 text-green-700', above_max: 'bg-blue-100 text-blue-700' }
@@ -516,561 +473,292 @@ function VmiSafety() {
   )
 }
 
-function FGAllocation({ onRefresh }) {
-  const dialog = useDialog()
-  const [uploading, setUploading] = useState(null)
-  const [uploadResults, setUploadResults] = useState({})
-  const [allocating, setAllocating] = useState(false)
-  // Holds the latest FG allocation, fetched from the server — populated on
-  // mount (not just right after clicking "Run Allocation"), so navigating
-  // to this tab shows the existing result instead of an empty table.
-  const [allocResult, setAllocResult] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [clearing, setClearing] = useState(false)
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(25)
-  const inhouseRef = useRef(null)
-  const warehouseRef = useRef(null)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await fetchLatestAllocation('fg', (page - 1) * pageSize, pageSize)
-      setAllocResult(res.data?.id != null ? res.data : null)
-    } catch (err) {
-      setError(err.response?.data?.detail || err.message)
-    } finally {
-      setLoading(false)
-    }
-  }, [page, pageSize])
-
-  useEffect(() => { load() }, [load])
-
-  const handleUpload = async (file, stockType) => {
-    if (!file) return
-    setUploading(stockType)
-    try {
-      const res = await uploadStockFile(file, stockType)
-      setUploadResults((prev) => ({ ...prev, [stockType]: { success: true, data: res.data } }))
-      onRefresh()
-    } catch (err) {
-      setUploadResults((prev) => ({ ...prev, [stockType]: { success: false, error: err.response?.data?.detail || err.message } }))
-    } finally {
-      setUploading(null)
-    }
-  }
-
-  const handleAllocate = async () => {
-    setAllocating(true)
-    setError('')
-    try {
-      await runAllocation('fg')
-      setPage(1)
-      await load()
-      onRefresh()
-    } catch (err) {
-      setError(err.response?.data?.detail || err.message)
-    } finally {
-      setAllocating(false)
-    }
-  }
-
-  const handleClearAll = async () => {
-    if (!(await dialog.confirm(
-      'Delete FG stock data (in-house + warehouse) and allocation results? WIP and other stock types are NOT affected.',
-      { title: 'Clear FG data', detail: 'This cannot be undone.' },
-    ))) return
-    setClearing(true)
-    try {
-      // Scope the deletion to FG-only stock types. Calling deleteStock()
-      // with no argument wipes EVERY stock category (WIP, plant,
-      // warehouse, combined, other) — a data-loss bug because this
-      // button is visually inside the "FG Allocation" section and the
-      // WIP section already has its own separately-scoped Clear button.
-      await deleteStock('fg_inhouse')
-      await deleteStock('fg_warehouse')
-      await deleteAllocations()
-      setAllocResult(null)
-      setUploadResults({})
-      setPage(1)
-      onRefresh()
-    } catch (err) {
-      setError(err.response?.data?.detail || err.message)
-    } finally {
-      setClearing(false)
-    }
-  }
-
-  const total = allocResult?.total || 0
-  const statusRenderer = useCallback((p) => <AllocStatusBadge status={p.data.status} />, [])
-  const columnDefs = useMemo(() => [
-    {
-      headerName: 'S No', width: 70, sortable: false, filter: false, pinned: 'left',
-      valueGetter: (p) => (page - 1) * pageSize + (p.node?.rowIndex ?? 0) + 1,
-    },
-    { field: 'cust_part_no', headerName: 'Cust Part #', minWidth: 150, pinned: 'left' },
-    { field: 'maini_part_no', headerName: 'Maini Part #', minWidth: 150 },
-    { field: 'customer', headerName: 'Customer', minWidth: 170 },
-    { field: 'demand_qty', headerName: 'Demand Qty', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
-    { field: 'fg_inhouse', headerName: 'In-House FG', minWidth: 130, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
-    { field: 'fg_warehouse', headerName: 'Warehouse FG', minWidth: 130, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
-    { field: 'total_fg', headerName: 'Total FG', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
-    { field: 'allocated', headerName: 'Allocated', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
-    { headerName: 'Stock Status', minWidth: 130, sortable: false, filter: false, cellRenderer: statusRenderer },
-  ], [page, pageSize, statusRenderer])
-
-  return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900">Finished Goods Allocation</h2>
-            <p className="text-sm text-gray-500">
-              Upload SAP FG stock report and allocate against demand
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleClearAll}
-              disabled={clearing}
-              title="Delete all FG stock & allocation data"
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50"
-            >
-              {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-              Clear All
-            </button>
-            <button
-              onClick={handleAllocate}
-              disabled={allocating}
-              className="flex items-center gap-2 px-3 py-2 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-            >
-              {allocating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-              Run Allocation
-            </button>
-          </div>
-        </div>
-
-        {error && <div className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">{error}</div>}
-
-        {/* Stock Sources */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-          <div className="border border-gray-200 rounded-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-2">In-House FG Stock</h3>
-            <div
-              className="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center cursor-pointer hover:border-blue-400"
-              onClick={() => inhouseRef.current?.click()}
-            >
-              {uploading === 'fg_inhouse' ? (
-                <Loader2 size={20} className="mx-auto text-blue-500 mb-1 animate-spin" />
-              ) : (
-                <Upload size={20} className="mx-auto text-gray-400 mb-1" />
-              )}
-              <p className="text-xs text-gray-500">Upload SAP in-house FG report</p>
-              <input ref={inhouseRef} type="file" accept=".xlsx,.xls,.csv" onChange={(e) => handleUpload(e.target.files?.[0], 'fg_inhouse')} className="hidden" />
-            </div>
-            {uploadResults.fg_inhouse && (
-              <div className={`mt-2 p-2 rounded text-xs ${uploadResults.fg_inhouse.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                {uploadResults.fg_inhouse.success ? `${uploadResults.fg_inhouse.data.row_count} rows uploaded` : uploadResults.fg_inhouse.error}
-              </div>
-            )}
-          </div>
-          <div className="border border-gray-200 rounded-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-2">Warehouse FG Stock</h3>
-            <div
-              className="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center cursor-pointer hover:border-blue-400"
-              onClick={() => warehouseRef.current?.click()}
-            >
-              {uploading === 'fg_warehouse' ? (
-                <Loader2 size={20} className="mx-auto text-blue-500 mb-1 animate-spin" />
-              ) : (
-                <Upload size={20} className="mx-auto text-gray-400 mb-1" />
-              )}
-              <p className="text-xs text-gray-500">Upload SAP warehouse FG report</p>
-              <input ref={warehouseRef} type="file" accept=".xlsx,.xls,.csv" onChange={(e) => handleUpload(e.target.files?.[0], 'fg_warehouse')} className="hidden" />
-            </div>
-            {uploadResults.fg_warehouse && (
-              <div className={`mt-2 p-2 rounded text-xs ${uploadResults.fg_warehouse.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                {uploadResults.fg_warehouse.success ? `${uploadResults.fg_warehouse.data.row_count} rows uploaded` : uploadResults.fg_warehouse.error}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Allocation Summary */}
-        {allocResult?.summary && (
-          <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-            <h3 className="text-sm font-semibold text-blue-900 mb-2">Allocation Summary</h3>
-            <div className="grid grid-cols-4 gap-3 text-center">
-              <div><p className="text-lg font-bold text-gray-900">{allocResult.summary.total_parts}</p><p className="text-xs text-gray-500">Total Parts</p></div>
-              <div><p className="text-lg font-bold text-green-700">{allocResult.summary.fully_allocated}</p><p className="text-xs text-gray-500">Full Stock</p></div>
-              <div><p className="text-lg font-bold text-yellow-700">{allocResult.summary.partial}</p><p className="text-xs text-gray-500">Partial</p></div>
-              <div><p className="text-lg font-bold text-red-700">{allocResult.summary.no_stock}</p><p className="text-xs text-gray-500">No Stock</p></div>
-            </div>
-          </div>
-        )}
-
-        {/* Allocation Table — AG Grid, server-side paginated: `allocResult.allocations`
-            only ever holds the CURRENT PAGE's rows (see `load` above), same
-            pattern as the Master Data page's grid. The grid is only mounted
-            once `loading` is false rather than passed `loading` as a
-            reactive prop — in this AG Grid version, toggling `loading` on an
-            already-mounted grid leaves its loading overlay stuck visible
-            even after rowData has updated; mounting fresh each time it's
-            true→false avoids that entirely. */}
-        <div className="bg-white border border-gray-200 rounded-lg" style={{ height: 440 }}>
-          {loading ? (
-            <div className="flex items-center justify-center h-full">
-              <Loader2 size={22} className="animate-spin text-blue-500" />
-            </div>
-          ) : (
-            <AgGridReact
-              theme={themeQuartz}
-              rowData={allocResult?.allocations || []}
-              columnDefs={columnDefs}
-              defaultColDef={gridDefaultColDef}
-              rowHeight={40}
-              headerHeight={38}
-              pagination={false}
-              enableCellTextSelection={true}
-              suppressRowClickSelection={true}
-              animateRows={true}
-              suppressMenuHide={true}
-              overlayNoRowsTemplate='<span style="padding:12px;color:#6b7280;font-size:13px;">Upload SAP FG reports and run allocation to see results.</span>'
-            />
-          )}
-        </div>
-        <GridPager total={total} page={page} pageSize={pageSize} onPage={setPage} onPageSize={(n) => { setPageSize(n); setPage(1) }} />
-
-        {/* Legend */}
-        <div className="flex items-center gap-4 mt-4">
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-green-500" />
-            <span className="text-xs text-gray-600">Full Stock</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-yellow-500" />
-            <span className="text-xs text-gray-600">Partial Stock</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-red-500" />
-            <span className="text-xs text-gray-600">No Stock</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
+// ─────────────────────────────────────────────────────────────────────────────
+// STOCK DATA — upload + inspect
+// Upload SAP stock / open-orders exports (auto-classified into FG / Child / WIP
+// / RM by material type + storage location; plant vs warehouse from the plant
+// code). Below, a file selector drives ONE AG Grid so you can actually validate
+// the data: server-side paging (files run to ~20k rows), category chips,
+// search, plant/warehouse filter, and export.
+//
+// Excluded rows (scrap / rework / non-valuated / no-part) never affect any
+// inventory total — they're shown only for reconciliation & troubleshooting,
+// behind the "Excluded" chip.
+// ─────────────────────────────────────────────────────────────────────────────
+const CAT_STYLE = {
+  fg: 'bg-blue-100 text-blue-700', child: 'bg-purple-100 text-purple-700',
+  wip: 'bg-orange-100 text-orange-700', rm: 'bg-green-100 text-green-700',
+  excluded: 'bg-gray-200 text-gray-600',
+}
+const CAT_LABEL = { fg: 'FG', child: 'Child', wip: 'WIP', rm: 'Raw Material', excluded: 'Excluded', other: 'Other' }
+function CategoryBadge({ value }) {
+  return <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${CAT_STYLE[value] || 'bg-gray-100 text-gray-600'}`}>{CAT_LABEL[value] || value || '—'}</span>
 }
 
-function WIPAllocation({ onRefresh }) {
+function StockUpload({ onRefresh }) {
   const dialog = useDialog()
   const [uploading, setUploading] = useState(false)
-  const [uploadResult, setUploadResult] = useState(null)
-  const [allocating, setAllocating] = useState(false)
-  // Latest WIP allocation, fetched from the server on mount — same fix as
-  // FGAllocation: previously this only ever showed data from a "Run
-  // Allocation" click made THIS session, so navigating to the tab after a
-  // page refresh showed an empty table even though a result already existed.
-  const [allocResult, setAllocResult] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [uploads, setUploads] = useState([])
   const [error, setError] = useState('')
   const [clearing, setClearing] = useState(false)
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(25)
   const fileRef = useRef(null)
 
-  const load = useCallback(async () => {
+  // Grid state
+  const [selected, setSelected] = useState('active')   // 'active' | upload id
+  const [category, setCategory] = useState('')          // '' = all (excl. excluded)
+  const [plantGroup, setPlantGroup] = useState('')
+  const [search, setSearch] = useState('')
+  const [data, setData] = useState(null)                // { total, rows, facets, reconciliation, sources }
+  const [loading, setLoading] = useState(false)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(50)
+
+  const loadUploads = async () => {
+    try {
+      const res = await fetchStockUploads()
+      setUploads(res.data?.uploads || [])
+    } catch (err) { console.error(err) }
+  }
+
+  const loadRows = async () => {
     setLoading(true)
     try {
-      const res = await fetchLatestAllocation('wip', (page - 1) * pageSize, pageSize)
-      setAllocResult(res.data?.id != null ? res.data : null)
+      const params = { skip: (page - 1) * pageSize, limit: pageSize }
+      if (selected !== 'active') params.upload_id = selected
+      if (category) params.category = category
+      if (plantGroup) params.plant_group = plantGroup
+      if (search.trim()) params.search = search.trim()
+      const res = await fetchStockRows(params)
+      setData(res.data)
     } catch (err) {
       setError(err.response?.data?.detail || err.message)
-    } finally {
-      setLoading(false)
-    }
-  }, [page, pageSize])
+    } finally { setLoading(false) }
+  }
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { loadUploads() }, [])
+  useEffect(() => { loadRows() }, [selected, category, plantGroup, page, pageSize])
+  // debounce search
+  useEffect(() => {
+    const t = setTimeout(() => { setPage(1); loadRows() }, 350)
+    return () => clearTimeout(t)
+  }, [search])
 
   const handleUpload = async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
-    setUploading(true)
+    setUploading(true); setError('')
     try {
-      const res = await uploadStockFile(file, 'wip')
-      setUploadResult({ success: true, data: res.data })
-      onRefresh()
+      const res = await uploadStockFile(file)
+      await loadUploads()
+      setSelected(res.data?.id ?? 'active')   // jump to what was just uploaded
+      setPage(1)
+      onRefresh?.()
     } catch (err) {
-      setUploadResult({ success: false, error: err.response?.data?.detail || err.message })
+      setError(err.response?.data?.detail || err.message)
     } finally {
       setUploading(false)
       if (fileRef.current) fileRef.current.value = ''
     }
   }
 
-  const handleAllocate = async () => {
-    setAllocating(true)
-    setError('')
+  const handleClearAll = async () => {
+    if (!(await dialog.confirm('Delete ALL uploaded stock data (plant, warehouse and WIP)? This cannot be undone.'))) return
+    setClearing(true); setError('')
     try {
-      await runAllocation('wip')
-      setPage(1)
-      await load()
-      onRefresh()
+      await deleteStock()
+      setSelected('active'); setData(null)
+      await loadUploads(); onRefresh?.()
     } catch (err) {
       setError(err.response?.data?.detail || err.message)
-    } finally {
-      setAllocating(false)
-    }
+    } finally { setClearing(false) }
   }
 
-  const handleClearWIP = async () => {
-    if (!(await dialog.confirm('Delete all WIP stock data and allocation results?', { title: 'Clear WIP data' }))) return
-    setClearing(true)
-    try {
-      await deleteStock('wip')       // WIP uploads are tagged 'wip'
-      await deleteAllocations()
-      setAllocResult(null)
-      setUploadResult(null)
-      setPage(1)
-      onRefresh()
-    } catch (err) {
-      setError(err.response?.data?.detail || err.message)
-    } finally {
-      setClearing(false)
-    }
+  const exportCsv = () => {
+    const rows = data?.rows || []
+    if (!rows.length) return
+    const cols = ['part', 'material_type', 'category', 'excluded_reason', 'plant', 'plant_group', 'location', 'description', 'qty', 'in_transit']
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
+    const csv = [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n')
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }))
+    const a = document.createElement('a')
+    a.href = url; a.download = `stock_data_page${page}.csv`; a.click()
+    URL.revokeObjectURL(url)
   }
 
-  const total = allocResult?.total || 0
-  const statusRenderer = useCallback((p) => <AllocStatusBadge status={p.data.status} />, [])
   const columnDefs = useMemo(() => [
-    {
-      headerName: 'S No', width: 70, sortable: false, filter: false, pinned: 'left',
-      valueGetter: (p) => (page - 1) * pageSize + (p.node?.rowIndex ?? 0) + 1,
-    },
-    { field: 'cust_part_no', headerName: 'Cust Part #', minWidth: 150, pinned: 'left' },
-    { field: 'maini_part_no', headerName: 'Maini Part #', minWidth: 150 },
-    { field: 'customer', headerName: 'Customer', minWidth: 170 },
-    { field: 'demand_qty', headerName: 'Demand Qty', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
-    { field: 'wip_qty', headerName: 'WIP Qty', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
-    { field: 'allocated', headerName: 'Allocated', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
-    { field: 'gap', headerName: 'Gap', minWidth: 100, type: 'numericColumn', cellClass: 'text-red-600', valueFormatter: (p) => p.value > 0 ? fmtNum(p.value) : '—' },
-    { headerName: 'Status', minWidth: 120, sortable: false, filter: false, cellRenderer: statusRenderer },
-  ], [page, pageSize, statusRenderer])
+    { field: 'part', headerName: 'Part #', minWidth: 150 },
+    { field: 'description', headerName: 'Description', minWidth: 200 },
+    { field: 'material_type', headerName: 'Material Type', minWidth: 130 },
+    { field: 'category', headerName: 'Category', minWidth: 120, cellRenderer: CategoryBadge },
+    { field: 'excluded_reason', headerName: 'Exclusion Reason', minWidth: 210, valueFormatter: (p) => p.value || '—' },
+    { field: 'plant', headerName: 'Plant', minWidth: 100 },
+    { field: 'plant_group', headerName: 'Plant / WH', minWidth: 120 },
+    { field: 'location', headerName: 'Storage Location', minWidth: 150 },
+    { field: 'qty', headerName: 'Qty', type: 'numericColumn', minWidth: 110, valueFormatter: (p) => fmtNum(p.value) },
+    { field: 'in_transit', headerName: 'In-Transit', type: 'numericColumn', minWidth: 120, valueFormatter: (p) => fmtNum(p.value) },
+  ], [])
+
+  const facets = data?.facets || {}
+  const rec = data?.reconciliation
+  const total = data?.total || 0
+  const CHIPS = [
+    { key: '', label: 'All included' },
+    { key: 'fg', label: 'FG' }, { key: 'child', label: 'Child' },
+    { key: 'wip', label: 'WIP' }, { key: 'rm', label: 'Raw Material' },
+    { key: 'excluded', label: 'Excluded' },
+  ]
 
   return (
     <div className="space-y-6">
+      {/* Upload */}
       <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-start justify-between mb-4 gap-3 flex-wrap">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">Work in Progress Allocation</h2>
-            <p className="text-sm text-gray-500">Allocate complete in-house WIP against demand</p>
+            <h2 className="text-lg font-semibold text-gray-900">Stock Data</h2>
+            <p className="text-sm text-gray-500 max-w-2xl">
+              Upload SAP <b>Plant Stock</b>, <b>Warehouse Stock</b>, <b>Open Orders (WIP)</b> — or one combined export.
+              Rows are auto-classified by material type + storage location. Re-uploading the same kind replaces the previous one.
+            </p>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={handleClearWIP}
-              disabled={clearing}
-              title="Delete all WIP stock & allocation data"
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50"
-            >
-              {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-              Clear All
+          <button onClick={handleClearAll} disabled={clearing}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50">
+            {clearing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Clear All Stock
+          </button>
+        </div>
+
+        <div className="border-2 border-dashed border-gray-300 rounded-lg p-5 text-center cursor-pointer hover:border-blue-400"
+          onClick={() => fileRef.current?.click()}>
+          {uploading ? <Loader2 size={22} className="mx-auto text-blue-500 mb-1 animate-spin" /> : <Upload size={22} className="mx-auto text-gray-400 mb-1" />}
+          <p className="text-sm font-medium text-gray-700">{uploading ? 'Uploading & classifying…' : 'Click to upload a stock file'}</p>
+          <p className="text-xs text-gray-400 mt-0.5">.xlsx, .xls or .csv</p>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleUpload} className="hidden" />
+        </div>
+
+        {error && <div className="mt-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">{error}</div>}
+
+        {/* Loaded files — selector */}
+        <div className="mt-5">
+          <p className="text-xs font-semibold text-gray-500 uppercase mb-2">Loaded stock files</p>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => { setSelected('active'); setPage(1) }}
+              className={`px-3 py-2 text-xs rounded-lg border text-left ${selected === 'active' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 hover:bg-gray-50'}`}>
+              <span className="font-semibold">All stock (active)</span>
+              <span className="block text-gray-500">combined — what the reports use</span>
             </button>
-            <button
-              onClick={() => fileRef.current?.click()}
-              className="flex items-center gap-2 px-3 py-2 text-xs font-medium border border-gray-200 rounded-lg hover:bg-gray-50"
-            >
-              {uploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
-              Upload WIP Report
+            {uploads.map((u) => (
+              <button key={u.id} onClick={() => { setSelected(u.id); setPage(1) }}
+                className={`px-3 py-2 text-xs rounded-lg border text-left ${selected === u.id ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 hover:bg-gray-50'}`}>
+                <span className="font-semibold">{u.filename}</span>
+                <span className="block text-gray-500">
+                  {u.kind} · {fmtNum(u.row_count)} rows · {u.at ? u.at.split('T')[0] : ''}
+                  {!u.is_active && <span className="ml-1 text-amber-600">· superseded</span>}
+                </span>
+              </button>
+            ))}
+            {uploads.length === 0 && <span className="text-sm text-gray-400">No stock uploaded yet.</span>}
+          </div>
+        </div>
+      </div>
+
+      {/* Reconciliation banner */}
+      {rec && rec.file_rows > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-4">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+            <span className="text-gray-700">Rows in file: <b>{fmtNum(rec.file_rows)}</b></span>
+            <span className="text-green-700">Included: <b>{fmtNum(rec.included_rows)}</b></span>
+            <span className="text-gray-500">Excluded: <b>{fmtNum(rec.excluded_rows)}</b></span>
+            {Object.entries(rec.excluded_by_reason || {}).map(([r, n]) => (
+              <span key={r} className="text-xs text-gray-500">• {r}: {fmtNum(n)}</span>
+            ))}
+          </div>
+          <p className="text-xs text-gray-400 mt-1">
+            Excluded rows never affect inventory calculations — shown for validation only (open the “Excluded” chip to inspect).
+          </p>
+        </div>
+      )}
+
+      {/* Filters + grid */}
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <div className="flex items-center gap-2 mb-3 flex-wrap">
+          {CHIPS.map((c) => (
+            <button key={c.key} onClick={() => { setCategory(c.key); setPage(1) }}
+              className={`px-2.5 py-1 text-xs font-medium rounded-full border ${category === c.key ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+              {c.label}{c.key && facets[c.key] != null ? ` (${fmtNum(facets[c.key])})` : ''}
             </button>
-            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleUpload} className="hidden" />
-            <button
-              onClick={handleAllocate}
-              disabled={allocating}
-              className="flex items-center gap-2 px-3 py-2 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-            >
-              {allocating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-              Run WIP Allocation
+          ))}
+          <select value={plantGroup} onChange={(e) => { setPlantGroup(e.target.value); setPage(1) }}
+            className="px-2 py-1.5 text-sm border border-gray-200 rounded-lg ml-1">
+            <option value="">Plant &amp; Warehouse</option>
+            <option value="plant">Plant only</option>
+            <option value="warehouse">Warehouse only</option>
+            <option value="unknown">Unknown</option>
+          </select>
+          <input value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search part / location / type…"
+            className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg w-56" />
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-gray-500">{fmtNum(total)} rows</span>
+            <button onClick={loadRows} disabled={loading}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50">
+              {loading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Refresh
+            </button>
+            <button onClick={exportCsv} disabled={!data?.rows?.length}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50">
+              <Download size={13} /> Export page
             </button>
           </div>
         </div>
 
-        {error && <div className="mb-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">{error}</div>}
-        {uploadResult && (
-          <div className={`mb-4 p-3 rounded-lg text-sm ${uploadResult.success ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
-            {uploadResult.success ? `Uploaded ${uploadResult.data.row_count} rows` : uploadResult.error}
-          </div>
-        )}
-
-        {allocResult?.summary && (
-          <div className="mb-4 p-4 bg-purple-50 border border-purple-200 rounded-lg">
-            <h3 className="text-sm font-semibold text-purple-900 mb-2">WIP Allocation Summary</h3>
-            <div className="grid grid-cols-4 gap-3 text-center">
-              <div><p className="text-lg font-bold text-gray-900">{allocResult.summary.total_parts}</p><p className="text-xs text-gray-500">Total Parts</p></div>
-              <div><p className="text-lg font-bold text-green-700">{allocResult.summary.fully_allocated}</p><p className="text-xs text-gray-500">Full</p></div>
-              <div><p className="text-lg font-bold text-yellow-700">{allocResult.summary.partial}</p><p className="text-xs text-gray-500">Partial</p></div>
-              <div><p className="text-lg font-bold text-red-700">{allocResult.summary.no_stock}</p><p className="text-xs text-gray-500">No Stock</p></div>
-            </div>
-          </div>
-        )}
-
-        <div className="bg-white border border-gray-200 rounded-lg" style={{ height: 440 }}>
+        <div style={{ height: 560 }}>
           {loading ? (
-            <div className="flex items-center justify-center h-full">
-              <Loader2 size={22} className="animate-spin text-blue-500" />
-            </div>
+            <div className="flex items-center justify-center h-full"><Loader2 size={22} className="animate-spin text-blue-500" /></div>
           ) : (
             <AgGridReact
               theme={themeQuartz}
-              rowData={allocResult?.allocations || []}
+              rowData={data?.rows || []}
               columnDefs={columnDefs}
-              defaultColDef={gridDefaultColDef}
-              rowHeight={40}
-              headerHeight={38}
+              defaultColDef={{ ...gridDefaultColDef, filter: true }}
+              rowHeight={38} headerHeight={38}
               pagination={false}
-              enableCellTextSelection={true}
-              suppressRowClickSelection={true}
-              animateRows={true}
-              suppressMenuHide={true}
-              overlayNoRowsTemplate='<span style="padding:12px;color:#6b7280;font-size:13px;">Upload WIP reports and run allocation to see results.</span>'
+              enableCellTextSelection={true} suppressRowClickSelection={true} animateRows={true}
+              overlayNoRowsTemplate='<span style="padding:12px;color:#6b7280;font-size:13px;">No stock rows for this selection — upload a stock file or clear the filters.</span>'
             />
           )}
         </div>
-        <GridPager total={total} page={page} pageSize={pageSize} onPage={setPage} onPageSize={(n) => { setPageSize(n); setPage(1) }} />
+        <GridPager total={total} page={page} pageSize={pageSize}
+          onPage={setPage} onPageSize={(n) => { setPageSize(n); setPage(1) }} />
       </div>
     </div>
   )
 }
 
-function LiquidationReports() {
-  const [allocations, setAllocations] = useState([])
-  const [selectedAlloc, setSelectedAlloc] = useState(null)
-  const [detail, setDetail] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(25)
-
-  useEffect(() => {
-    loadAllocations()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const loadAllocations = async () => {
-    try {
-      const res = await fetchAllocations()
-      setAllocations(res.data)
-      // Auto-select the most recent report so its detail is visible right
-      // away — previously this tab always started on "Select an allocation
-      // report to view details" even though a report already existed.
-      if (res.data?.length > 0) {
-        setSelectedAlloc((cur) => cur ?? res.data[0].id)
-      }
-    } catch (err) {
-      console.error('Failed to load allocations:', err)
-    }
-  }
-
-  // Any change to the selected report or the page size invalidates the
-  // current page — same pattern as Master Data's search/pageSize reset.
-  useEffect(() => { setPage(1) }, [selectedAlloc, pageSize])
-
-  const loadDetail = useCallback(async () => {
-    if (selectedAlloc == null) { setDetail(null); return }
-    setLoading(true)
-    try {
-      const res = await fetchAllocationDetail(selectedAlloc, (page - 1) * pageSize, pageSize)
-      setDetail(res.data)
-    } catch (err) {
-      console.error('Failed to load allocation detail:', err)
-    } finally {
-      setLoading(false)
-    }
-  }, [selectedAlloc, page, pageSize])
-
-  useEffect(() => { loadDetail() }, [loadDetail])
-
-  const total = detail?.total || 0
-  const statusRenderer = useCallback((p) => <AllocStatusBadge status={p.data.status} />, [])
-  const columnDefs = useMemo(() => [
-    {
-      headerName: 'S No', width: 70, sortable: false, filter: false, pinned: 'left',
-      valueGetter: (p) => (page - 1) * pageSize + (p.node?.rowIndex ?? 0) + 1,
-    },
-    { headerName: 'Part #', minWidth: 150, pinned: 'left', valueGetter: (p) => p.data?.cust_part_no || p.data?.maini_part_no },
-    { field: 'customer', headerName: 'Customer', minWidth: 170 },
-    { field: 'demand_qty', headerName: 'Demand Qty', minWidth: 120, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
-    { field: 'total_fg', headerName: 'FG Allocated', minWidth: 130, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value || 0) },
-    { field: 'wip_qty', headerName: 'WIP Allocated', minWidth: 130, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value || 0) },
-    { field: 'allocated', headerName: 'Total Allocated', minWidth: 140, type: 'numericColumn', valueFormatter: (p) => fmtNum(p.value) },
-    { field: 'gap', headerName: 'Unallocated', minWidth: 120, type: 'numericColumn', cellClass: 'text-red-600', valueFormatter: (p) => p.value > 0 ? fmtNum(p.value) : '—' },
-    { headerName: 'Status', minWidth: 120, sortable: false, filter: false, cellRenderer: statusRenderer },
-  ], [page, pageSize, statusRenderer])
-
+// Server-side pagination footer (same UI/maths as the Master Data page).
+function GridPager({ total, page, pageSize, onPage, onPageSize }) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const pageSafe = Math.min(page, totalPages)
+  if (total === 0) return null
   return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900">FG & WIP Liquidation Reports</h2>
-            <p className="text-sm text-gray-500">Published liquidation reports detailed by Part, Customer, and Value</p>
-          </div>
-        </div>
-
-        {/* Allocation List */}
-        {allocations.length > 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
-            {allocations.map((a) => (
-              <button
-                key={a.id}
-                onClick={() => setSelectedAlloc(a.id)}
-                className={`border rounded-lg p-3 text-left transition-colors ${
-                  selectedAlloc === a.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-gray-900">#{a.id} — {a.allocation_type?.toUpperCase()}</span>
-                  <span className="text-xs text-gray-500">{a.created_at?.split('T')[0]}</span>
-                </div>
-                {a.summary && (
-                  <div className="flex gap-3 mt-2 text-xs">
-                    <span className="text-green-600">Full: {a.summary.fully_allocated}</span>
-                    <span className="text-yellow-600">Partial: {a.summary.partial}</span>
-                    <span className="text-red-600">No Stock: {a.summary.no_stock}</span>
-                  </div>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Detail Table — AG Grid, server-side paginated per selected report.
-            Mounted only once `loading` is false (see FGAllocation's comment
-            on why `loading` isn't passed as a reactive prop here). */}
-        <div className="bg-white border border-gray-200 rounded-lg" style={{ height: 440 }}>
-          {loading ? (
-            <div className="flex items-center justify-center h-full">
-              <Loader2 size={22} className="animate-spin text-blue-500" />
-            </div>
-          ) : (
-            <AgGridReact
-              theme={themeQuartz}
-              rowData={detail?.allocations || []}
-              columnDefs={columnDefs}
-              defaultColDef={gridDefaultColDef}
-              rowHeight={40}
-              headerHeight={38}
-              pagination={false}
-              enableCellTextSelection={true}
-              suppressRowClickSelection={true}
-              animateRows={true}
-              suppressMenuHide={true}
-              overlayNoRowsTemplate={`<span style="padding:12px;color:#6b7280;font-size:13px;">${
-                allocations.length > 0 ? 'Select an allocation report to view details.' : 'Run FG and WIP allocations first to generate liquidation reports.'
-              }</span>`}
-            />
-          )}
-        </div>
-        <GridPager total={total} page={page} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
+    <div className="flex flex-wrap items-center justify-between gap-3 mt-3 text-sm text-gray-600">
+      <div className="flex items-center gap-2">
+        <span>Rows per page:</span>
+        <select value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))}
+          className="border border-gray-200 rounded-md px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+          {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <span className="text-gray-400">
+          {(pageSafe - 1) * pageSize + 1}–{Math.min(pageSafe * pageSize, total)} of {fmtNum(total)}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <button onClick={() => onPage(1)} disabled={pageSafe <= 1}
+          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">« First</button>
+        <button onClick={() => onPage(pageSafe - 1)} disabled={pageSafe <= 1}
+          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">‹ Prev</button>
+        <span className="px-2">Page {pageSafe} of {totalPages}</span>
+        <button onClick={() => onPage(pageSafe + 1)} disabled={pageSafe >= totalPages}
+          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">Next ›</button>
+        <button onClick={() => onPage(totalPages)} disabled={pageSafe >= totalPages}
+          className="px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40">Last »</button>
       </div>
     </div>
   )
