@@ -62,6 +62,12 @@ export default function RawDataViewer() {
 
           const isManual = (email.gmail_message_id || '').startsWith('manual-upload-')
           for (const att of email.attachments || []) {
+            // Hide decorative images that produced no data (email signature
+            // logos / inline Outlook graphics). Non-image files are always kept
+            // even when empty — a data file that extracted nothing is a real
+            // problem you need to see.
+            const isImage = (att.content_type || '').startsWith('image/')
+            if (isImage && att.has_raw_data === false) continue
             atts.push({
               id: att.id,
               filename: att.filename,

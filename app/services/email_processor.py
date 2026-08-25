@@ -99,18 +99,43 @@ def _quantity_values_are_garbage(extracted: dict) -> bool:
     return True
 
 
+def _is_ocr_derived(extracted: dict) -> bool:
+    """True if these rows came from OCR rather than a real machine-readable table.
+
+    OCR on a table screenshot happily emits a *multi-column* result whose headers
+    are several real headers run together ("PO Line Revision Contract Line …")
+    and whose cells concatenate the values of those columns ("Fio126569 1 3/…").
+    That looked like a good parse to the old weak-check, so the AI/vision path was
+    skipped and the mangled OCR output was kept. OCR text is never authoritative
+    for tables — always let AI vision re-read the image.
+    """
+    if extracted.get("_ocr") or str(extracted.get("_source") or "") == "image_ocr":
+        return True
+    strategy = str((extracted.get("_debug") or {}).get("selected_strategy") or "")
+    if "ocr" in strategy.lower():
+        return True
+    # Heuristic: a header made of many words with no separator is run-together OCR.
+    for c in extracted.get("columns") or []:
+        if len(str(c).split()) >= 5:
+            return True
+    return False
+
+
 def _is_weak_extraction(extracted: dict) -> bool:
     """True if deterministic parsing failed to find a real table of line items.
 
-    Weak when: no rows, OR only junk single-column text/OCR output, OR no column
-    looks like a demand field, OR the quantity/price columns contain non-numeric
-    garbage (a mis-aligned table).
+    Weak when: no rows, OR only junk single-column text/OCR output, OR the rows
+    came from OCR (never trustworthy for tables — see _is_ocr_derived), OR no
+    column looks like a demand field, OR the quantity/price columns contain
+    non-numeric garbage (a mis-aligned table).
     """
     rows = extracted.get("rows") or []
     if not rows:
         return True
     cols = set(extracted.get("columns") or [])
     if cols in _JUNK_COLUMNS:
+        return True
+    if _is_ocr_derived(extracted):
         return True
     if not _has_meaningful_column(extracted.get("columns") or []):
         return True
@@ -119,21 +144,66 @@ def _is_weak_extraction(extracted: dict) -> bool:
     return False
 
 
+#: Vision APIs downscale a long edge beyond this, so a very wide screenshot of a
+#: wide table ends up with unreadably small text (columns then get merged /
+#: misread). We split such images into vertical slices that each fit within it.
+_VISION_MAX_EDGE = 1500
+_VISION_MAX_ASPECT = 2.2          # wider than this → slice into columns-chunks
+_VISION_MAX_SLICES = 4
+
+
+def _slice_wide_image(im):
+    """Split an extremely wide table screenshot into overlapping vertical slices.
+
+    A 2928x388 strip (7.5:1) is downscaled to ~1568px wide by the API, leaving
+    ~10px per row — the model can't read it and starts merging columns. Slicing
+    keeps each piece near 1:1..2:1 so the text stays legible at full scale. The
+    overlap means a column split across two slices is still fully visible in one.
+    """
+    w, h = im.size
+    if w <= _VISION_MAX_EDGE or (w / max(h, 1)) <= _VISION_MAX_ASPECT:
+        return [im]
+    n = min(_VISION_MAX_SLICES, max(2, round((w / max(h, 1)) / _VISION_MAX_ASPECT) + 1))
+    step = w // n
+    overlap = int(step * 0.12)
+    out = []
+    for i in range(n):
+        left = max(0, i * step - (overlap if i else 0))
+        right = min(w, (i + 1) * step + (overlap if i < n - 1 else 0))
+        out.append(im.crop((left, 0, right, h)))
+    return out
+
+
 def _image_file_for_ai(filename: str, file_path: str | None) -> list[tuple[str, str]]:
-    """Read a standalone image file as a single (media_type, base64) pair."""
+    """Read a standalone image file as (media_type, base64) pairs for AI vision.
+
+    Wide table screenshots are sliced (see _slice_wide_image) so column text
+    survives the API's downscale; everything else is sent as a single image.
+    """
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     media = _IMAGE_MEDIA.get(ext)
     if not media or not file_path or not os.path.exists(file_path):
         return []
     try:
+        from PIL import Image
+        import io
         with open(file_path, "rb") as f:
             data = f.read()
-        if media not in ("image/png", "image/jpeg", "image/gif", "image/webp"):
-            from PIL import Image
-            import io
-            im = Image.open(io.BytesIO(data)).convert("RGB")
-            buf = io.BytesIO(); im.save(buf, format="PNG"); data = buf.getvalue(); media = "image/png"
-        return [(media, base64.b64encode(data).decode("ascii"))]
+        im = Image.open(io.BytesIO(data))
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        parts = _slice_wide_image(im)
+        if len(parts) > 1:
+            logger.info(
+                f"Wide image '{filename}' ({im.size[0]}x{im.size[1]}) split into "
+                f"{len(parts)} slices so table text stays legible for AI vision"
+            )
+        out = []
+        for p in parts:
+            buf = io.BytesIO()
+            p.save(buf, format="PNG")
+            out.append(("image/png", base64.b64encode(buf.getvalue()).decode("ascii")))
+        return out
     except Exception as e:
         logger.warning(f"Could not read image '{filename}' for AI extraction: {e}")
         return []
