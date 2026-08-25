@@ -11,6 +11,10 @@ class AttachmentResponse(BaseModel):
     content_type: str | None
     file_size: int | None
     created_at: datetime
+    # False when nothing was extracted from this file (e.g. an email signature
+    # logo). Lets the Raw Data viewer hide decorative images instead of listing
+    # them as empty entries. Defaults True so other callers are unaffected.
+    has_raw_data: bool = True
 
     model_config = {"from_attributes": True}
 

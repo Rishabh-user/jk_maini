@@ -36,12 +36,33 @@ Pull data from tables (HTML or image), and also from sentences like
 For each row, map values to these canonical fields (use null when absent):
 """ + json.dumps(SYSTEM_SCHEMA_COLUMNS) + """
 
+KEEP EVERY COLUMN. The canonical names above are for the fields you recognise —
+they are NOT a whitelist. For any other column in the document (e.g. "Line",
+"Revision", "Contract", "Delivery Seq", "WO", "ECL", "PPAP Req", "Commit Date"),
+include it in the row using the document's OWN header text as the key. Never drop
+a column just because it has no canonical name: this extraction is the auditable
+record of what the document contained, and later stages pick what they need.
+
 Notes on mapping:
 - "Customer Material Number" / "Comp Part" / bare "Part" → "Customer Part #"
 - "Supplier Material Number" / vendor item → "Maini Part #" (Maini is the supplier)
 - Quantities like "Open Qty", "Ordered", "Requested Quantity" → "Quantity"
 - Keep part numbers EXACTLY as written (preserve dashes, leading zeros).
 - Do NOT invent data. If a column isn't present, use null.
+
+Reading TABLES IN IMAGES (important):
+- Read the header row first and treat each column as a SEPARATE field. NEVER
+  concatenate values from different columns into one field (e.g. do not produce
+  "10126569 1 3 9975819" — that is PO, Line, Revision and Contract as four
+  distinct values).
+- Align every cell to its column by x-position. Blank cells are null — do not
+  shift later values left into an empty column.
+- Read digits carefully and transcribe them verbatim (e.g. "10126569", not
+  "Fio126569"). If a value is genuinely unreadable, use null rather than a guess.
+- A wide screenshot may arrive as SEVERAL images that are vertical slices of ONE
+  table, left-to-right and slightly overlapping. Combine them into single rows:
+  match rows by their vertical position, and if the same column appears in two
+  slices, use it once. Return one row per table row, not one row per slice.
 
 Also capture sender INSTRUCTIONS that should affect the order — e.g.
 "discard PO X", "ignore the highlighted line", "increase qty for part Y to 50",

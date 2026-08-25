@@ -87,8 +87,9 @@ async def get_inventory_summary(
     grp_totals: dict[str, float] = {}
     for r in rows:
         c = r.get("_category")
-        if c in cat_totals:
-            cat_totals[c]["parts"].add(r.get("_part")); cat_totals[c]["qty"] += float(r.get("_qty") or 0)
+        if c not in cat_totals:
+            continue   # 'excluded' (scrap / rework / non-valuated / no-part) never counts
+        cat_totals[c]["parts"].add(r.get("_part")); cat_totals[c]["qty"] += float(r.get("_qty") or 0)
         grp_totals[r.get("_plant_group", "unknown")] = grp_totals.get(r.get("_plant_group", "unknown"), 0.0) + float(r.get("_qty") or 0)
 
     categories = {k: {"parts": len(v["parts"]), "qty": round(v["qty"], 2)} for k, v in cat_totals.items()}
@@ -299,6 +300,120 @@ async def fg_liquidation(
     }
 
 
+@router.get("/stock/uploads")
+async def list_stock_uploads(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """All stock uploads (newest first) — the file selector for the Stock Data
+    viewer. Flags which uploads are the 'active' ones actually feeding the
+    reports (latest per kind), so superseded files are visibly distinguishable."""
+    uploads = (await db.execute(
+        select(InventoryStock).order_by(InventoryStock.created_at.desc())
+    )).scalars().all()
+    active_ids = {u.id for u in await _latest_classified_uploads(db)}
+    out = []
+    for u in uploads:
+        summary = (u.parsed_data or {}).get("summary", {}) or {}
+        out.append({
+            "id": u.id, "kind": u.stock_type, "filename": u.filename,
+            "row_count": u.row_count,
+            "at": u.created_at.isoformat() if u.created_at else None,
+            "is_active": u.id in active_ids,
+            "by_category": summary.get("by_category", {}),
+            "reconciliation": summary.get("reconciliation"),
+        })
+    return {"uploads": out}
+
+
+@router.get("/stock/rows")
+async def get_stock_rows(
+    upload_id: int = Query(None, description="A specific upload; omit for the active stock set."),
+    kind: str = Query(None, description="Filter the active set by kind: plant | warehouse | wip | combined."),
+    category: str = Query(None, description="fg | child | wip | rm | excluded"),
+    plant_group: str = Query(None, description="plant | warehouse | unknown"),
+    search: str = Query(None, description="Match part / location / material type / plant."),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Server-side paged + filtered classified stock rows for the Stock Data grid.
+
+    Returns `facets` (counts per category over the whole filtered-except-category
+    set) so the UI's category chips show totals without extra requests, plus the
+    upload's reconciliation (file rows = included + excluded).
+    """
+    if upload_id:
+        u = (await db.execute(select(InventoryStock).where(InventoryStock.id == upload_id))).scalar_one_or_none()
+        if not u:
+            raise HTTPException(status_code=404, detail="Stock upload not found")
+        uploads = [u]
+    else:
+        uploads = await _latest_classified_uploads(db)
+        if kind:
+            uploads = [x for x in uploads if x.stock_type == kind]
+
+    rows = _effective_annotated_rows(uploads) if not upload_id else (
+        (uploads[0].parsed_data or {}).get("rows", [])
+    )
+
+    # Reconciliation: single upload → its own; multiple → summed.
+    rec = {"file_rows": 0, "included_rows": 0, "excluded_rows": 0, "excluded_by_reason": {}}
+    for u in uploads:
+        r = ((u.parsed_data or {}).get("summary") or {}).get("reconciliation")
+        if not r:
+            continue
+        rec["file_rows"] += r.get("file_rows", 0)
+        rec["included_rows"] += r.get("included_rows", 0)
+        rec["excluded_rows"] += r.get("excluded_rows", 0)
+        for k, v in (r.get("excluded_by_reason") or {}).items():
+            rec["excluded_by_reason"][k] = rec["excluded_by_reason"].get(k, 0) + v
+
+    def _proj(r: dict) -> dict:
+        return {
+            "part": r.get("_part"), "category": r.get("_category"),
+            "excluded_reason": r.get("_excluded_reason"),
+            "plant": r.get("_plant"), "plant_group": r.get("_plant_group"),
+            "location": r.get("_location"),
+            "material_type": r.get("Material Type") or r.get("material_type") or r.get("Matl type"),
+            "description": r.get("Material Description") or r.get("description"),
+            "qty": r.get("_qty"), "in_transit": r.get("_in_transit"),
+        }
+
+    projected = [_proj(r) for r in rows]
+
+    # Apply non-category filters first so facet counts reflect them.
+    if plant_group:
+        projected = [r for r in projected if (r["plant_group"] or "") == plant_group]
+    if search:
+        q = search.strip().lower()
+        projected = [
+            r for r in projected
+            if q in " ".join(str(r.get(f) or "") for f in ("part", "location", "material_type", "plant", "description")).lower()
+        ]
+
+    facets: dict[str, int] = {}
+    for r in projected:
+        c = r["category"] or "other"
+        facets[c] = facets.get(c, 0) + 1
+
+    if category:
+        projected = [r for r in projected if (r["category"] or "") == category]
+    else:
+        # Excluded rows are audit-only — hidden unless explicitly requested.
+        projected = [r for r in projected if r["category"] != "excluded"]
+
+    total = len(projected)
+    return {
+        "total": total,
+        "rows": projected[skip: skip + limit],
+        "facets": facets,
+        "reconciliation": rec,
+        "sources": [{"id": u.id, "kind": u.stock_type, "filename": u.filename} for u in uploads],
+    }
+
+
 @router.post("/upload-stock")
 async def upload_stock_file(
     stock_type: str = Query(None, description="Optional legacy hint; classification is now data-driven."),
@@ -363,12 +478,26 @@ async def upload_stock_file(
     await db.flush()
 
     logger.info(f"Stock upload: file={filename}, kind={kind}, {len(annotated)} rows, {summary['by_category']}")
+    # Return a preview of the classified rows so the UI can show what was just
+    # uploaded (part / category / plant-group / location / qty) without a second
+    # request. Capped to keep the response small — the full set stays in the DB.
+    preview = [
+        {
+            "part": r.get("_part"), "category": r.get("_category"),
+            "plant": r.get("_plant"), "plant_group": r.get("_plant_group"),
+            "location": r.get("_location"), "material_type": r.get("Material Type") or r.get("material_type"),
+            "qty": r.get("_qty"), "in_transit": r.get("_in_transit"),
+        }
+        for r in annotated[:2000]
+    ]
     return {
         "id": stock.id,
         "kind": kind,
         "filename": filename,
         "row_count": len(annotated),
         "summary": summary,
+        "rows": preview,
+        "preview_truncated": len(annotated) > len(preview),
     }
 
 

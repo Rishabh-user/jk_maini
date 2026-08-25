@@ -2458,14 +2458,18 @@ class FileParser:
 
     @staticmethod
     def parse_image(file_path: str) -> dict:
+        """OCR an image. Results are tagged `_ocr` because OCR is never
+        authoritative for tables — it runs adjacent columns together (headers and
+        cells alike), so the caller always re-reads images with AI vision and
+        treats this only as a fallback when AI is unavailable."""
         image = Image.open(file_path)
         text = pytesseract.image_to_string(image)
         rows = FileParser._parse_delimited_or_line_item_text(text)
         if rows:
-            return {"columns": list(rows[0].keys()), "rows": rows, "raw_text": text}
+            return {"columns": list(rows[0].keys()), "rows": rows, "raw_text": text, "_ocr": True}
         lines = [line.strip() for line in text.split("\n") if line.strip()]
         rows = [{"ocr_text": line} for line in lines]
-        return {"columns": ["ocr_text"] if rows else [], "rows": rows, "raw_text": text}
+        return {"columns": ["ocr_text"] if rows else [], "rows": rows, "raw_text": text, "_ocr": True}
 
     @staticmethod
     def parse_html(file_path: str) -> dict:

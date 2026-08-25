@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.models.user import User, UserRole
 from app.models.email import Email, EmailStatus
+from app.models.data import RawData
 from app.schemas.email import EmailResponse, EmailListResponse, ProcessEmailResponse
 from app.services.gmail_service import GmailService, save_email_to_db
 from app.services import gmail_oauth
@@ -48,7 +49,25 @@ async def list_emails(
     result = await db.execute(query)
     emails = result.scalars().all()
 
-    return EmailListResponse(total=total, emails=emails)
+    # Which attachments actually produced extracted rows? One query for the whole
+    # page (no N+1). Decorative images (signature logos) yield nothing, so the
+    # Raw Data viewer uses this to hide them rather than listing empty files.
+    att_ids = [a.id for e in emails for a in (e.attachments or [])]
+    with_data: set[int] = set()
+    if att_ids:
+        rows = await db.execute(
+            select(RawData.attachment_id).where(RawData.attachment_id.in_(att_ids)).distinct()
+        )
+        with_data = {r[0] for r in rows.all()}
+
+    payload = []
+    for e in emails:
+        item = EmailResponse.model_validate(e)
+        for att in item.attachments or []:
+            att.has_raw_data = att.id in with_data
+        payload.append(item)
+
+    return EmailListResponse(total=total, emails=payload)
 
 
 @router.get("/{email_id}", response_model=EmailResponse)
